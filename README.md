@@ -45,6 +45,18 @@ Es gibt sie in zwei Varianten:
 - **Kopieren** übernimmt den angezeigten Tag mit einem Tipp auf Mo–Fr, Sa–So oder alle Tage.
 - Geänderte Tage bekommen einen Punkt. Erst **Speichern** schickt sie an das Thermostat, **Verwerfen** macht alles rückgängig.
 
+**Bedingungen (unterhalb des Wochenplans, auch im Dialog der kompakten Karte)**
+
+Mit Bedingungen reagiert das Thermostat auf andere Geräte, ohne dass man eine Automation schreiben muss. Beispiel: *Wenn Präsenz erkannt, dann Manuell 22 °C mit Boost, und zurück zum Plan, sobald niemand mehr da ist.*
+
+- **Wenn:** eine Entity wählen (Binärsensor, Sensor, Schalter, Person, Helfer …) und die Bedingung antippen. Bei An/Aus-Geräten gibt es passende Knöpfe wie „erkannt / nicht erkannt“ oder „offen / geschlossen“. Bei Zahlen-Sensoren gibt es `>` `<` `=` `≠` und einen Wert (Komma oder Punkt), bei Auswahl-Entities eine Liste.
+- **Dann:** **Manuell** mit einer Temperatur (−/+ in der Schrittweite des Thermostats) oder **Aus**. Optional **Boost starten**.
+- **Zurücksetzen:** Ist die Option an, stellt die Integration den Zustand von vorher wieder her (Plan/Manuell/Aus, Solltemperatur, Boost aus), sobald die Bedingung nicht mehr erfüllt ist.
+- Jede Bedingung lässt sich mit dem Schalter in der Liste vorübergehend abschalten. Antippen öffnet sie zum Bearbeiten oder Löschen.
+- Eine gerade aktive Bedingung ist in der Liste umrandet. In beiden Karten erscheint dann zusätzlich unten links ein Symbol.
+
+Ausgewertet werden die Bedingungen in der Integration selbst, also auch wenn keine Karte geöffnet ist und nach einem Neustart von Home Assistant. Gespeichert sind sie in `.storage/smart_heating_planer.conditions`. Zustände wie `unavailable` oder `unknown` lösen nichts aus. Gelten mehrere Bedingungen für dasselbe Thermostat, gewinnt die zuletzt erfüllte, und zurückgesetzt wird erst, wenn keine mehr erfüllt ist. Ändert man während einer aktiven Bedingung von Hand etwas am Thermostat, wird das beim Zurücksetzen überschrieben. Anlegen und Ändern dürfen nur Administratoren.
+
 ## Kompatible Thermostate
 
 Die Karte braucht ein Thermostat, das über **Zigbee2MQTT** angebunden ist und seinen Wochenplan als Text-Entities `text.<name>_weekly_schedule_<tag>` im Format `HH:MM/Temperatur` bereitstellt. Die Grenzen pro Modell (Anzahl Schaltpunkte, Temperaturbereich) erkennt die Karte automatisch über das Modell in der Geräte-Registry.

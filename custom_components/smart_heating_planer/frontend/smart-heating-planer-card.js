@@ -11,9 +11,13 @@
  *  - custom:smart-heating-planer-card          Thermostat + Wochenplan
  *  - custom:smart-heating-planer-compact-card  nur Thermostat, Tipp auf die Temperatur öffnet den Wochenplan
  * Beide zeigen unten rechts den Boost-Knopf (Rakete), sofern das Thermostat Boost kann.
+ *
+ * Bedingungen (ab 1.3.0): "Wenn Entity X = Wert, dann Manuell/Aus, optional Boost,
+ * optional zurücksetzen". Ausgewertet werden sie in der Integration (conditions.py),
+ * die Karte bearbeitet sie nur über die Websocket-API smart_heating_planer/conditions/*.
  */
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 
 const DAYS = [
   { key: "monday", short: "Mo", long: "Montag" },
@@ -52,6 +56,35 @@ const PRESET_FALLBACKS = ["none", "comfort", "home", "eco"];
 const HVAC_LABELS = { off: "Aus", auto: "Plan", heat: "Manuell" };
 const HVAC_ICONS = { off: "mdi:power", auto: "mdi:calendar-clock", heat: "mdi:hand-back-right" };
 const ACTION_LABELS = { heating: "Heizt", idle: "Leerlauf", off: "Aus", preheating: "Vorheizen" };
+
+// Bedingungen
+const COND_DOMAINS = {
+  binary_sensor: "Binärsensoren",
+  sensor: "Sensoren",
+  switch: "Schalter",
+  light: "Lichter",
+  input_boolean: "Helfer (Schalter)",
+  input_number: "Helfer (Zahl)",
+  input_select: "Helfer (Auswahl)",
+  select: "Auswahl",
+  person: "Personen",
+  device_tracker: "Geräte-Tracker",
+  media_player: "Medien",
+  sun: "Sonne",
+};
+const ON_OFF_DOMAINS = ["binary_sensor", "switch", "light", "input_boolean", "fan"];
+const ON_OFF_LABELS = {
+  presence: ["erkannt", "nicht erkannt"],
+  occupancy: ["erkannt", "nicht erkannt"],
+  motion: ["erkannt", "nicht erkannt"],
+  door: ["offen", "geschlossen"],
+  window: ["offen", "geschlossen"],
+  opening: ["offen", "geschlossen"],
+  garage_door: ["offen", "geschlossen"],
+  moisture: ["nass", "trocken"],
+  connectivity: ["verbunden", "getrennt"],
+};
+const OPERATOR_LABELS = { eq: "=", ne: "≠", gt: ">", lt: "<" };
 
 const pad = (n) => String(n).padStart(2, "0");
 const toHHMM = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
@@ -119,6 +152,10 @@ class SmartHeatingPlanerCard extends HTMLElement {
     this._compact = false;
     this._pointerDown = false;
     this._lastHtml = null;
+    this._rules = null; // null = Integration liefert (noch) keine Bedingungen
+    this._ruleDraft = null;
+    this._condMessage = null;
+    this._condBusy = false;
     this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
     // Nicht neu zeichnen, solange ein Finger auf der Karte liegt – sonst wird der Knopf
     // zwischen Antippen und Loslassen ersetzt und der Tipp geht verloren
@@ -153,8 +190,17 @@ class SmartHeatingPlanerCard extends HTMLElement {
     if (this._hass) this._render();
   }
 
+  connectedCallback() {
+    this._subscribeConditions();
+  }
+
+  disconnectedCallback() {
+    this._unsubscribeConditions();
+  }
+
   set hass(hass) {
     this._hass = hass;
+    this._subscribeConditions();
     if (!this._config) return;
     this._entities = this._findEntities();
     this._expireSavedDrafts();
@@ -439,6 +485,223 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   _openPlanner() {}
 
+  // ---------- Bedingungen ----------
+
+  _subscribeConditions() {
+    if (this._condSub || !this._hass?.connection || !this.isConnected) return;
+    this._condSub = this._hass.connection
+      .subscribeMessage(
+        (msg) => {
+          this._rules = msg.rules || [];
+          this._render();
+        },
+        { type: "smart_heating_planer/conditions/subscribe" },
+      )
+      .catch(() => {
+        // Ältere Integration ohne Bedingungen: Abschnitt einfach weglassen
+        this._condSub = null;
+        this._rules = null;
+        return null;
+      });
+  }
+
+  _unsubscribeConditions() {
+    const sub = this._condSub;
+    this._condSub = null;
+    sub?.then((unsub) => unsub && unsub()).catch(() => {});
+  }
+
+  _myRules() {
+    return (this._rules || []).filter((r) => r.climate === this._config.entity);
+  }
+
+  _ruleTempRange() {
+    const a = this._hass.states[this._config.entity]?.attributes || {};
+    const p = this._entities.profile;
+    return {
+      step: a.target_temp_step || TEMP_STEP,
+      min: Math.max(p.min, a.min_temp ?? p.min),
+      max: Math.min(p.max, a.max_temp ?? p.max),
+    };
+  }
+
+  // Art der Bedingung je nach Entity: an/aus, Zahl oder Text/Auswahl
+  _condKind(entityId) {
+    const st = entityId && this._hass.states[entityId];
+    const domain = (entityId || "").split(".")[0];
+    if (ON_OFF_DOMAINS.includes(domain)) return "onoff";
+    if (domain === "input_number" || domain === "number") return "number";
+    if (domain === "sensor" && st && (st.attributes.unit_of_measurement || !isNaN(parseFloat(st.state)))) return "number";
+    return "text";
+  }
+
+  _condOptions(entityId) {
+    const st = entityId && this._hass.states[entityId];
+    const domain = (entityId || "").split(".")[0];
+    if (st?.attributes?.options?.length) return st.attributes.options;
+    if (domain === "person" || domain === "device_tracker") return ["home", "not_home"];
+    if (domain === "sun") return ["above_horizon", "below_horizon"];
+    if (domain === "media_player") return ["on", "off", "playing", "paused", "idle"];
+    return null;
+  }
+
+  _stateLabel(entityId, value) {
+    const st = this._hass.states[entityId];
+    if (this._condKind(entityId) === "onoff") {
+      const labels = ON_OFF_LABELS[st?.attributes?.device_class] || ["an", "aus"];
+      if (value === "on") return labels[0];
+      if (value === "off") return labels[1];
+    }
+    const named = { home: "zu Hause", not_home: "abwesend", above_horizon: "über dem Horizont", below_horizon: "unter dem Horizont", playing: "spielt", paused: "pausiert", idle: "inaktiv" };
+    return named[value] || value;
+  }
+
+  _entityName(entityId) {
+    return this._hass.states[entityId]?.attributes?.friendly_name || entityId;
+  }
+
+  _hasOffMode() {
+    return (this._hass.states[this._config.entity]?.attributes?.hvac_modes || []).includes("off");
+  }
+
+  _newRuleDraft() {
+    const states = this._hass.states;
+    const presence = Object.keys(states).find(
+      (id) => id.startsWith("binary_sensor.") && ["presence", "occupancy", "motion"].includes(states[id].attributes.device_class),
+    );
+    const r = this._ruleTempRange();
+    const raw = states[this._config.entity]?.attributes?.temperature;
+    const cur = raw == null || isNaN(Number(raw)) ? 21 : Number(raw);
+    return {
+      climate: this._config.entity,
+      entity: presence || "",
+      operator: "eq",
+      value: "on",
+      mode: "manual",
+      temperature: Math.min(r.max, Math.max(r.min, Math.round(cur / r.step) * r.step)),
+      boost: false,
+      revert: true,
+      enabled: true,
+    };
+  }
+
+  _setDraftEntity(entityId) {
+    const d = this._ruleDraft;
+    d.entity = entityId;
+    const kind = this._condKind(entityId);
+    const st = this._hass.states[entityId];
+    if (kind === "onoff") {
+      d.operator = "eq";
+      d.value = "on";
+    } else if (kind === "number") {
+      d.operator = "gt";
+      d.value = st && !isNaN(parseFloat(st.state)) ? String(Math.round(parseFloat(st.state))) : "0";
+    } else {
+      d.operator = "eq";
+      d.value = this._condOptions(entityId)?.[0] || (st && !["unknown", "unavailable"].includes(st.state) ? st.state : "");
+    }
+  }
+
+  _ruleSummary(rule) {
+    const name = this._entityName(rule.entity);
+    const cond =
+      this._condKind(rule.entity) === "onoff" && rule.operator === "eq"
+        ? this._stateLabel(rule.entity, rule.value)
+        : `${OPERATOR_LABELS[rule.operator]} ${this._stateLabel(rule.entity, rule.value)}`;
+    const action = rule.mode === "off" ? "Aus" : `Manuell ${fmtTemp(rule.temperature)} °C${rule.boost ? " + Boost" : ""}`;
+    return { when: `${name} ${cond}`, then: action, revert: rule.revert };
+  }
+
+  async _saveRule(rule) {
+    this._condBusy = true;
+    this._condMessage = null;
+    this._render();
+    try {
+      await this._hass.callWS({ type: "smart_heating_planer/conditions/save", rule });
+      this._ruleDraft = null;
+    } catch (err) {
+      this._condMessage = { text: `Fehler: ${err?.message || err}`, error: true };
+    }
+    this._condBusy = false;
+    this._render();
+  }
+
+  async _deleteRule(id) {
+    if (!confirm("Diese Bedingung löschen?")) return;
+    this._condBusy = true;
+    this._render();
+    try {
+      await this._hass.callWS({ type: "smart_heating_planer/conditions/delete", rule_id: id });
+      this._ruleDraft = null;
+    } catch (err) {
+      this._condMessage = { text: `Fehler: ${err?.message || err}`, error: true };
+    }
+    this._condBusy = false;
+    this._render();
+  }
+
+  _onCondClick(action, value) {
+    const d = this._ruleDraft;
+    switch (action) {
+      case "c-add":
+        this._ruleDraft = this._newRuleDraft();
+        this._condMessage = null;
+        break;
+      case "c-edit": {
+        const rule = this._myRules().find((r) => r.id === value);
+        if (rule) this._ruleDraft = { ...rule };
+        this._condMessage = null;
+        break;
+      }
+      case "c-toggle": {
+        const rule = this._myRules().find((r) => r.id === value);
+        if (rule) return this._saveRule({ ...rule, enabled: !rule.enabled });
+        break;
+      }
+      case "c-cancel":
+        this._ruleDraft = null;
+        this._condMessage = null;
+        break;
+      case "c-delete":
+        return d?.id && this._deleteRule(d.id);
+      case "c-save":
+        if (!d.entity) {
+          this._condMessage = { text: "Bitte zuerst eine Entity wählen.", error: true };
+          break;
+        }
+        if (!String(d.value).trim()) {
+          this._condMessage = { text: "Bitte einen Wert für die Bedingung angeben.", error: true };
+          break;
+        }
+        return this._saveRule(d);
+      case "c-value":
+        d.value = value;
+        break;
+      case "c-op":
+        d.operator = value;
+        break;
+      case "c-mode":
+        d.mode = value;
+        if (value === "off") d.boost = false;
+        break;
+      case "c-temp": {
+        const r = this._ruleTempRange();
+        const next = Number(d.temperature) + Number(value) * r.step;
+        d.temperature = Math.min(r.max, Math.max(r.min, Math.round(next / r.step) * r.step));
+        break;
+      }
+      case "c-boost":
+        d.boost = !d.boost;
+        break;
+      case "c-revert":
+        d.revert = !d.revert;
+        break;
+      default:
+        return;
+    }
+    this._render();
+  }
+
   _addSlot() {
     const slots = this._editableSlots(this._day);
     if (!slots || slots.length >= this._entities.profile.maxSlots) return;
@@ -552,6 +815,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     if (!el || el.disabled) return;
     const { action, value } = el.dataset;
     const index = Number(el.dataset.index);
+    if (action.startsWith("c-")) return this._onCondClick(action, value);
     switch (action) {
       case "target-down": return this._changeTarget(-1);
       case "target-up": return this._changeTarget(1);
@@ -593,6 +857,13 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _onChange(ev) {
     const el = ev.target;
     if (el.dataset.action === "time") this._changeSlotTime(Number(el.dataset.index), el.value);
+    else if (el.dataset.action === "c-entity" && this._ruleDraft) {
+      this._setDraftEntity(el.value);
+      this._render();
+    } else if (el.dataset.action === "c-input" && this._ruleDraft) {
+      this._ruleDraft.value = el.value.trim();
+      this._render();
+    }
   }
 
   // ---------- Darstellung ----------
@@ -601,7 +872,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     if (!this._hass || !this._config) return;
     // Nicht neu zeichnen, während eine Uhrzeit eingegeben wird (sonst schließt sich der Picker)
     const active = this.shadowRoot.activeElement;
-    if (active && active.tagName === "INPUT") {
+    if (active && (active.tagName === "INPUT" || active.tagName === "SELECT")) {
       this._deferredRender = true;
       return;
     }
@@ -614,7 +885,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const st = this._hass.states[this._config.entity];
     const html = st
       ? `${STYLE}<ha-card class="${this._compact ? "compact" : ""}">${this._renderThermostat(st)}${
-          this._compact ? this._renderMessage() : this._renderPlanner()
+          this._compact ? this._renderMessage() : this._renderPlanner() + this._renderConditions()
         }</ha-card>`
       : `${STYLE}<ha-card><div class="warn">Entity ${esc(this._config.entity)} nicht gefunden.</div></ha-card>`;
     // Unveränderte Karte nicht neu aufbauen (Thermostat meldet sich oft mehrmals pro Sekunde)
@@ -671,7 +942,12 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _renderFoot(st, now) {
     const b = this._entities.boost;
     const plan = st.state === "auto" && now ? now : "";
-    if (!b) return plan ? `<div class="plan-now">${plan}</div>` : "";
+    const activeRule = this._myRules().find((r) => r.active);
+    const indicator = activeRule
+      ? `<span class="cond-active" title="${esc(`Bedingung aktiv: ${this._ruleSummary(activeRule).when}`)}"><ha-icon icon="mdi:auto-mode"></ha-icon></span>`
+      : "<span></span>";
+    if (!b && !activeRule) return plan ? `<div class="plan-now">${plan}</div>` : "";
+    if (!b) return `<div class="foot">${indicator}<div class="plan-now">${plan}</div><span></span></div>`;
     // Nur sperren, wenn die Boost-Entity selbst weg ist – das Thermostat kann noch "unbekannt" melden
     const unavailable = this._hass.states[b.id]?.state === "unavailable";
     const shown = this._displayedBoost();
@@ -679,7 +955,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const left = cd && Number(cd.state) > 0 ? `${cd.state} ${cd.attributes.unit_of_measurement || ""}`.trim() : "";
     return `
       <div class="foot">
-        <span></span>
+        ${indicator}
         <div class="plan-now">${plan}</div>
         <button class="boost ${shown.on ? "on" : ""} ${shown.pending ? "pending" : ""}" data-action="boost"
           aria-pressed="${shown.on}" title="${shown.on ? "Boost beenden" : "Boost starten"}" ${unavailable ? "disabled" : ""}>
@@ -751,6 +1027,131 @@ class SmartHeatingPlanerCard extends HTMLElement {
              </div>`
           : ""
       }
+    `;
+  }
+
+  _renderConditions() {
+    if (this._rules === null) return "";
+    const rules = this._myRules();
+    const d = this._ruleDraft;
+    const msg = this._condMessage
+      ? `<div class="msg ${this._condMessage.error ? "error" : ""}">${esc(this._condMessage.text)}</div>`
+      : "";
+    return `
+      <div class="section-title">Bedingungen</div>
+      ${
+        rules.length
+          ? `<div class="rules">${rules.map((r) => this._renderRule(r)).join("")}</div>`
+          : d
+            ? ""
+            : `<div class="warn">Zum Beispiel: Wenn Präsenz erkannt, dann Manuell 22 °C mit Boost – und zurück zum Plan, sobald niemand mehr da ist.</div>`
+      }
+      ${d ? this._renderRuleEditor(d) : `<button class="ghost" data-action="c-add"><ha-icon icon="mdi:plus-circle-outline"></ha-icon>Bedingung</button>`}
+      ${msg}
+    `;
+  }
+
+  _renderRule(r) {
+    const s = this._ruleSummary(r);
+    const editing = this._ruleDraft?.id === r.id;
+    return `
+      <div class="rule ${r.enabled ? "" : "disabled"} ${r.active ? "active" : ""} ${editing ? "editing" : ""}">
+        <button class="rule-main" data-action="c-edit" data-value="${esc(r.id)}" aria-label="Bearbeiten">
+          <span class="rule-when"><ha-icon icon="${r.active ? "mdi:auto-mode" : "mdi:help-rhombus-outline"}"></ha-icon>Wenn ${esc(s.when)}</span>
+          <span class="rule-then">→ ${esc(s.then)}${s.revert ? " · danach zurück" : ""}${r.active ? " · <b>aktiv</b>" : ""}</span>
+        </button>
+        <button class="toggle ${r.enabled ? "on" : ""}" data-action="c-toggle" data-value="${esc(r.id)}" ${this._condBusy ? "disabled" : ""}
+          role="switch" aria-checked="${r.enabled}" aria-label="${r.enabled ? "Deaktivieren" : "Aktivieren"}"><i></i></button>
+      </div>
+    `;
+  }
+
+  _renderRuleEditor(d) {
+    const states = this._hass.states;
+    const groups = {};
+    for (const [id, st] of Object.entries(states)) {
+      const domain = id.split(".")[0];
+      if (!COND_DOMAINS[domain] || id === this._config.entity) continue;
+      (groups[domain] = groups[domain] || []).push({ id, name: st.attributes.friendly_name || id });
+    }
+    const entityOptions = Object.keys(COND_DOMAINS)
+      .filter((dom) => groups[dom])
+      .map(
+        (dom) =>
+          `<optgroup label="${esc(COND_DOMAINS[dom])}">${groups[dom]
+            .sort((a, b) => a.name.localeCompare(b.name, "de"))
+            .map((e) => `<option value="${esc(e.id)}" ${e.id === d.entity ? "selected" : ""}>${esc(e.name)}</option>`)
+            .join("")}</optgroup>`,
+      )
+      .join("");
+    const kind = this._condKind(d.entity);
+    const cur = d.entity && states[d.entity];
+    const options = this._condOptions(d.entity);
+    let condHtml = "";
+    if (!d.entity) {
+      condHtml = "";
+    } else if (kind === "onoff") {
+      condHtml = `<div class="chips">${["on", "off"]
+        .map((v) => `<button class="chip ${d.value === v ? "on" : ""}" data-action="c-value" data-value="${v}">${esc(this._stateLabel(d.entity, v))}</button>`)
+        .join("")}</div>`;
+    } else {
+      const ops = kind === "number" ? ["gt", "lt", "eq", "ne"] : ["eq", "ne"];
+      const opChips = ops
+        .map((o) => `<button class="chip op ${d.operator === o ? "on" : ""}" data-action="c-op" data-value="${o}">${OPERATOR_LABELS[o]}</button>`)
+        .join("");
+      const input = options
+        ? `<select class="field" data-action="c-input">${(options.includes(d.value) ? options : [d.value, ...options])
+            .filter((o) => o !== "")
+            .map((o) => `<option value="${esc(o)}" ${o === d.value ? "selected" : ""}>${esc(this._stateLabel(d.entity, o))}</option>`)
+            .join("")}</select>`
+        : `<input class="field" data-action="c-input" ${kind === "number" ? 'type="text" inputmode="decimal"' : 'type="text"'} value="${esc(d.value)}" aria-label="Wert">${
+            kind === "number" && cur?.attributes?.unit_of_measurement ? `<span class="unit">${esc(cur.attributes.unit_of_measurement)}</span>` : ""
+          }`;
+      condHtml = `<div class="chips">${opChips}</div><div class="value-row">${input}</div>`;
+    }
+    const now = cur ? `<div class="hint">Aktuell: ${esc(this._stateLabel(d.entity, cur.state))}${cur.attributes.unit_of_measurement ? " " + esc(cur.attributes.unit_of_measurement) : ""}</div>` : "";
+    const r = this._ruleTempRange();
+    const offOk = this._hasOffMode();
+    const boostOk = !!this._entities.boost;
+    return `
+      <div class="editor">
+        <div class="ed-label">Wenn</div>
+        <select class="field" data-action="c-entity" aria-label="Entity">
+          ${d.entity ? "" : `<option value="" selected disabled>Entity wählen …</option>`}
+          ${entityOptions}
+        </select>
+        ${condHtml}
+        ${now}
+        <div class="ed-label">Dann</div>
+        <div class="chips">
+          <button class="chip ${d.mode === "manual" ? "on" : ""}" data-action="c-mode" data-value="manual"><ha-icon icon="mdi:hand-back-right"></ha-icon>Manuell</button>
+          ${offOk || d.mode === "off" ? `<button class="chip ${d.mode === "off" ? "on" : ""}" data-action="c-mode" data-value="off"><ha-icon icon="mdi:power"></ha-icon>Aus</button>` : ""}
+        </div>
+        ${
+          d.mode === "manual"
+            ? `<div class="ed-temp">
+                 <button class="small" data-action="c-temp" data-value="-1" ${d.temperature <= r.min ? "disabled" : ""} aria-label="Kälter"><ha-icon icon="mdi:minus"></ha-icon></button>
+                 <span class="temp big-temp">${fmtTemp(d.temperature)} °C</span>
+                 <button class="small" data-action="c-temp" data-value="1" ${d.temperature >= r.max ? "disabled" : ""} aria-label="Wärmer"><ha-icon icon="mdi:plus"></ha-icon></button>
+               </div>
+               ${
+                 boostOk
+                   ? `<button class="opt" data-action="c-boost" role="switch" aria-checked="${d.boost}">
+                        <ha-icon icon="mdi:rocket-launch" class="${d.boost ? "boost-on" : ""}"></ha-icon><span>Boost starten</span>
+                        <span class="toggle ${d.boost ? "on" : ""}"><i></i></span></button>`
+                   : ""
+               }`
+            : ""
+        }
+        <button class="opt" data-action="c-revert" role="switch" aria-checked="${d.revert}">
+          <ha-icon icon="mdi:backup-restore"></ha-icon><span>Zurücksetzen, wenn die Bedingung nicht mehr erfüllt ist</span>
+          <span class="toggle ${d.revert ? "on" : ""}"><i></i></span></button>
+        <div class="savebar static">
+          ${d.id ? `<button class="ghost del-btn" data-action="c-delete" ${this._condBusy ? "disabled" : ""} aria-label="Löschen"><ha-icon icon="mdi:delete-outline"></ha-icon></button>` : ""}
+          <button class="ghost" data-action="c-cancel" ${this._condBusy ? "disabled" : ""}>Abbrechen</button>
+          <button class="primary" data-action="c-save" ${this._condBusy ? "disabled" : ""}>${this._condBusy ? "Speichert …" : "Speichern"}</button>
+        </div>
+      </div>
     `;
   }
 
@@ -923,6 +1324,42 @@ const STYLE = `<style>
   .msg.error { background: rgba(219,68,55,.15); color: var(--error-color, #db4437); }
   .link { text-decoration: underline; color: inherit; padding: 0 0 0 4px; }
   .warn { color: var(--secondary-text-color); font-size: .9rem; }
+  .cond-active { justify-self: start; width: 48px; height: 48px; display: grid; place-items: center; color: var(--primary-color); }
+  .rules { display: flex; flex-direction: column; gap: 8px; }
+  .rule { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 4px; border-radius: var(--shp-radius); background: var(--secondary-background-color); }
+  .rule.active { box-shadow: inset 0 0 0 2px var(--primary-color); }
+  .rule.editing { box-shadow: inset 0 0 0 2px var(--warning-color, #ffa600); }
+  .rule.disabled .rule-main { opacity: .45; }
+  .rule-main { flex: 1; min-width: 0; min-height: var(--shp-touch); display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px; padding: 4px 8px; text-align: left; }
+  .rule-when { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+  .rule-when ha-icon { --mdc-icon-size: 18px; color: var(--secondary-text-color); flex: none; }
+  .rule.active .rule-when ha-icon { color: var(--primary-color); }
+  .rule-then { font-size: .85rem; color: var(--secondary-text-color); padding-left: 24px; }
+  .toggle { position: relative; width: 52px; height: 32px; flex: none; border-radius: 999px; background: var(--disabled-color, #8a8a8a); transition: background .2s; display: inline-block; }
+  .toggle i { position: absolute; top: 4px; left: 4px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: transform .2s; }
+  .toggle.on { background: var(--primary-color); }
+  .toggle.on i { transform: translateX(20px); }
+  button.toggle { padding: 0; margin: 8px 0; }
+  .editor { display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: var(--shp-radius); border: 1px solid var(--primary-color); }
+  .ed-label { font-weight: 500; color: var(--secondary-text-color); font-size: .85rem; text-transform: uppercase; letter-spacing: .04em; }
+  .field { font: inherit; font-size: 1rem; min-height: var(--shp-touch); width: 100%; box-sizing: border-box; padding: 0 12px; border-radius: 12px;
+    border: 1px solid var(--divider-color); background: var(--card-background-color, var(--ha-card-background)); color: var(--primary-text-color); color-scheme: light dark; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .chips .chip { min-height: var(--shp-touch); display: inline-flex; align-items: center; gap: 6px; padding: 0 18px; }
+  .chips .chip.op { min-width: 56px; justify-content: center; font-size: 1.2rem; padding: 0 12px; }
+  .value-row { display: flex; align-items: center; gap: 8px; }
+  .unit { color: var(--secondary-text-color); white-space: nowrap; }
+  .hint { font-size: .8rem; color: var(--secondary-text-color); margin-top: -4px; }
+  .ed-temp { display: flex; align-items: center; justify-content: center; gap: 16px; }
+  .ed-temp .small { background: var(--secondary-background-color); width: 52px; height: 52px; }
+  .big-temp { font-size: 1.6rem; min-width: 96px; }
+  .opt { display: flex; align-items: center; gap: 10px; min-height: var(--shp-touch); padding: 4px 4px 4px 8px; border-radius: 12px; text-align: left; }
+  .opt:active { background: var(--secondary-background-color); }
+  .opt span:not(.toggle) { flex: 1; }
+  .opt ha-icon { color: var(--secondary-text-color); }
+  .opt ha-icon.boost-on { color: var(--shp-boost-on-color, #ff5a1f); }
+  .savebar.static { position: static; background: none; }
+  .del-btn { flex: 0 0 var(--shp-touch); color: var(--error-color, #db4437); padding: 0; }
 </style>`;
 
 class SmartHeatingPlanerCardEditor extends HTMLElement {
@@ -989,6 +1426,7 @@ class SmartHeatingPlanerCompactCard extends SmartHeatingPlanerCard {
   }
 
   disconnectedCallback() {
+    super.disconnectedCallback();
     this._dialog?.close(true);
   }
 
