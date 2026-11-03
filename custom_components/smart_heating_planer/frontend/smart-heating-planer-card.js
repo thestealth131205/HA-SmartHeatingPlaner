@@ -3,11 +3,12 @@
  *
  * Liest und schreibt den Wochenplan direkt im Thermostat über die
  * Zigbee2MQTT-Entities text.<name>_weekly_schedule_<tag>.
- * Format pro Tag: "00:00/18 07:00/21 13:00/20 …", max. 12 Schaltpunkte,
- * erster Schaltpunkt immer 00:00, Temperatur 5–30 °C in 0,5er-Schritten.
+ * Format pro Tag: "00:00/18 07:00/21 13:00/20 …", erster Schaltpunkt immer
+ * 00:00. Wie viele Schaltpunkte und welcher Temperaturbereich erlaubt sind,
+ * hängt vom Thermostat-Modell ab (siehe PROFILES).
  */
 
-const VERSION = "1.0.1";
+const VERSION = "1.1.0";
 
 const DAYS = [
   { key: "monday", short: "Mo", long: "Montag" },
@@ -23,10 +24,19 @@ const JS_DAY = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday"
 const WORKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 const WEEKEND = ["saturday", "sunday"];
 
-const MAX_SLOTS = 12;
-const TEMP_MIN = 5;
-const TEMP_MAX = 30;
 const TEMP_STEP = 0.5;
+
+// Grenzen je Modell, wie sie die Zigbee2MQTT-Konverter prüfen (model_id aus der Geräte-Registry).
+// pad: Tages-String auf maxSlots mit dem letzten Schaltpunkt auffüllen, so meldet ihn das Gerät selbst.
+const PROFILES = {
+  "TRV-ZBT": { maxSlots: 12, min: 5, max: 30, pad: true },
+  "TRV-ZBL": { maxSlots: 12, min: 5, max: 30, pad: true },
+  "TP-WGZBA": { maxSlots: 12, min: 5, max: 30, pad: true },
+  TRVZB: { maxSlots: 6, min: 4, max: 35, pad: false },
+  "BTH-RA": { maxSlots: 10, min: 5, max: 30, pad: false },
+};
+// Unbekannte Modelle: vorsichtig, keine Wiederholungen (manche Konverter lehnen doppelte Uhrzeiten ab)
+const DEFAULT_PROFILE = { maxSlots: 6, min: 5, max: 30, pad: false };
 const SAVED_TIMEOUT_MS = 30000;
 const TARGET_DEBOUNCE_MS = 900;
 const PROGRAM_TIMEOUT_MS = 30000;
@@ -43,7 +53,7 @@ const toMinutes = (s) => {
   const v = Number(m[1]) * 60 + Number(m[2]);
   return v >= 0 && v < 1440 ? v : null;
 };
-const clampTemp = (t) => Math.min(TEMP_MAX, Math.max(TEMP_MIN, Math.round(t / TEMP_STEP) * TEMP_STEP));
+const clampTemp = (t, p) => Math.min(p.max, Math.max(p.min, Math.round(t / TEMP_STEP) * TEMP_STEP));
 const fmtTemp = (t) =>
   t == null || isNaN(t) ? "–" : Number(t).toLocaleString("de-DE", { minimumFractionDigits: Number(t) % 1 ? 1 : 0, maximumFractionDigits: 1 });
 const esc = (s) =>
@@ -66,14 +76,17 @@ function parseSchedule(str) {
     if (!byTime.has(t)) byTime.set(t, Number(m[3]));
   }
   const slots = [...byTime].map(([t, temp]) => ({ t, temp })).sort((a, b) => a.t - b.t);
-  if (!slots.length || slots[0].t !== 0) return null;
+  if (!slots.length) return null;
+  // Manche Thermostate (z. B. Bosch) erlauben einen Tag ohne 00:00. Die Nacht läuft dann mit
+  // der letzten Temperatur weiter, die Karte zeigt sie als festen 00:00-Schaltpunkt.
+  if (slots[0].t !== 0) slots.unshift({ t: 0, temp: slots[slots.length - 1].temp });
   return slots;
 }
 
-/** [{t, temp}] → String mit genau 12 Schaltpunkten (wie das Thermostat ihn selbst meldet). */
-function serializeSchedule(slots) {
+/** [{t, temp}] → Tages-String, bei pad aufgefüllt auf maxSlots (wie das Thermostat ihn selbst meldet). */
+function serializeSchedule(slots, profile) {
   const parts = [...slots].sort((a, b) => a.t - b.t).map((s) => `${toHHMM(s.t)}/${s.temp}`);
-  while (parts.length < MAX_SLOTS) parts.push(parts[parts.length - 1]);
+  if (profile.pad) while (parts.length < profile.maxSlots) parts.push(parts[parts.length - 1]);
   return parts.join(" ");
 }
 
@@ -160,6 +173,11 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const out = { climate, days: {}, activeGroup: null, editGroup: null };
     const registry = hass.entities || {};
     const deviceId = registry[climate]?.device_id;
+    const model = (deviceId && hass.devices?.[deviceId]?.model_id) || null;
+    const profile = { ...(PROFILES[model] || DEFAULT_PROFILE) };
+    if (Number(this._config.max_slots) > 0) profile.maxSlots = Number(this._config.max_slots);
+    out.model = model;
+    out.profile = profile;
     if (deviceId) {
       for (const [id, entry] of Object.entries(registry)) {
         if (entry.device_id !== deviceId) continue;
@@ -204,7 +222,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const draft = this._drafts[day];
     if (!draft || draft.saved) return false;
     const device = this._deviceSlots(day);
-    return !device || serializeSchedule(draft.slots) !== serializeSchedule(device);
+    return !device || serializeSchedule(draft.slots, this._entities.profile) !== serializeSchedule(device, this._entities.profile);
   }
 
   _dirtyDays() {
@@ -224,7 +242,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     for (const [day, draft] of Object.entries(this._drafts)) {
       const device = this._deviceSlots(day);
       if (draft.saved) {
-        if (device && serializeSchedule(device) === serializeSchedule(draft.slots)) delete this._drafts[day];
+        if (device && serializeSchedule(device, this._entities.profile) === serializeSchedule(draft.slots, this._entities.profile)) delete this._drafts[day];
         else if (Date.now() - draft.savedAt > SAVED_TIMEOUT_MS) {
           delete this._drafts[day];
           this._message = { text: "Das Thermostat hat den neuen Plan nicht bestätigt. Bitte nochmal speichern.", error: true };
@@ -254,8 +272,8 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _changeTarget(delta) {
     const st = this._hass.states[this._config.entity];
     const step = st.attributes.target_temp_step || TEMP_STEP;
-    const min = st.attributes.min_temp ?? TEMP_MIN;
-    const max = st.attributes.max_temp ?? TEMP_MAX;
+    const min = st.attributes.min_temp ?? this._entities.profile.min;
+    const max = st.attributes.max_temp ?? this._entities.profile.max;
     const cur = Number(this._currentTarget() ?? 20);
     const next = Math.min(max, Math.max(min, Math.round((cur + delta * step) / step) * step));
     this._pendingTarget = { value: next, at: Date.now() };
@@ -331,7 +349,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   _addSlot() {
     const slots = this._editableSlots(this._day);
-    if (!slots || slots.length >= MAX_SLOTS) return;
+    if (!slots || slots.length >= this._entities.profile.maxSlots) return;
     // In die größte Lücke einfügen, auf 15 Minuten gerundet
     let best = null;
     slots.forEach((s, i) => {
@@ -360,7 +378,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _changeSlotTemp(index, delta) {
     const slots = this._editableSlots(this._day);
     if (!slots || !slots[index]) return;
-    slots[index].temp = clampTemp(slots[index].temp + delta * TEMP_STEP);
+    slots[index].temp = clampTemp(slots[index].temp + delta * TEMP_STEP, this._entities.profile);
     this._render();
   }
 
@@ -410,7 +428,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
       for (const day of days) {
         const entity = this._entities.days[day];
         const draft = this._drafts[day];
-        await this._call("text", "set_value", { entity_id: entity, value: serializeSchedule(draft.slots) });
+        await this._call("text", "set_value", { entity_id: entity, value: serializeSchedule(draft.slots, this._entities.profile) });
         draft.saved = true;
         draft.savedAt = Date.now();
         // Kleine Pause, damit das Thermostat die Befehle nacheinander verarbeitet
@@ -588,7 +606,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
           ? `${this._renderTimeline(slots)}
              <div class="slots">${slots.map((s, i) => this._renderSlot(s, i, slots)).join("")}</div>
              <div class="row-actions">
-               <button class="ghost" data-action="add" ${slots.length >= MAX_SLOTS ? "disabled" : ""}>
+               <button class="ghost" data-action="add" ${slots.length >= e.profile.maxSlots ? "disabled" : ""}>
                  <ha-icon icon="mdi:plus-circle-outline"></ha-icon>Zeitpunkt</button>
                <button class="ghost ${this._copyOpen ? "on" : ""}" data-action="copy-toggle">
                  <ha-icon icon="mdi:content-copy"></ha-icon>${esc(dayLong)} kopieren</button>
@@ -671,10 +689,10 @@ class SmartHeatingPlanerCard extends HTMLElement {
           }
           <span class="until">bis ${end}</span>
         </div>
-        <button class="small" data-action="temp-down" data-index="${i}" ${s.temp <= TEMP_MIN ? "disabled" : ""} aria-label="Kälter">
+        <button class="small" data-action="temp-down" data-index="${i}" ${s.temp <= this._entities.profile.min ? "disabled" : ""} aria-label="Kälter">
           <ha-icon icon="mdi:minus"></ha-icon></button>
         <span class="temp">${fmtTemp(s.temp)}°</span>
-        <button class="small" data-action="temp-up" data-index="${i}" ${s.temp >= TEMP_MAX ? "disabled" : ""} aria-label="Wärmer">
+        <button class="small" data-action="temp-up" data-index="${i}" ${s.temp >= this._entities.profile.max ? "disabled" : ""} aria-label="Wärmer">
           <ha-icon icon="mdi:plus"></ha-icon></button>
         <button class="small del" data-action="remove" data-index="${i}" ${i === 0 ? "disabled" : ""} aria-label="Löschen">
           <ha-icon icon="mdi:delete-outline"></ha-icon></button>
@@ -787,11 +805,14 @@ class SmartHeatingPlanerCardEditor extends HTMLElement {
       this._form.schema = [
         { name: "entity", required: true, selector: { entity: { domain: "climate" } } },
         { name: "name", selector: { text: {} } },
+        { name: "max_slots", selector: { number: { min: 1, max: 12, mode: "box" } } },
       ];
-      this._form.computeLabel = (s) => ({ entity: "Thermostat", name: "Name (optional)" })[s.name];
+      this._form.computeLabel = (s) =>
+        ({ entity: "Thermostat", name: "Name (optional)", max_slots: "Max. Schaltpunkte pro Tag (optional, sonst automatisch)" })[s.name];
       this._form.addEventListener("value-changed", (ev) => {
         const config = { ...this._config, ...ev.detail.value };
         if (!config.name) delete config.name;
+        if (!config.max_slots) delete config.max_slots;
         this._config = config;
         this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
       });
