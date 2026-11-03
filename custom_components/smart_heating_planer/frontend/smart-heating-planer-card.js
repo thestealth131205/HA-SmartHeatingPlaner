@@ -7,7 +7,7 @@
  * erster Schaltpunkt immer 00:00, Temperatur 5–30 °C in 0,5er-Schritten.
  */
 
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 
 const DAYS = [
   { key: "monday", short: "Mo", long: "Montag" },
@@ -29,6 +29,7 @@ const TEMP_MAX = 30;
 const TEMP_STEP = 0.5;
 const SAVED_TIMEOUT_MS = 30000;
 const TARGET_DEBOUNCE_MS = 900;
+const PROGRAM_TIMEOUT_MS = 30000;
 
 const HVAC_LABELS = { off: "Aus", auto: "Plan", heat: "Manuell" };
 const HVAC_ICONS = { off: "mdi:power", auto: "mdi:calendar-clock", heat: "mdi:hand-back-right" };
@@ -91,7 +92,19 @@ class SmartHeatingPlanerCard extends HTMLElement {
     this._pendingTarget = null; // {value, at}
     this._watchKey = null;
     this._deferredRender = false;
+    this._pendingProgram = null; // {group, at}
+    this._pointerDown = false;
+    this._lastHtml = null;
     this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
+    // Nicht neu zeichnen, solange ein Finger auf der Karte liegt – sonst wird der Knopf
+    // zwischen Antippen und Loslassen ersetzt und der Tipp geht verloren
+    this.shadowRoot.addEventListener("pointerdown", () => (this._pointerDown = true));
+    const release = () => {
+      this._pointerDown = false;
+      if (this._deferredRender) setTimeout(() => this._render(), 50);
+    };
+    this.shadowRoot.addEventListener("pointerup", release);
+    this.shadowRoot.addEventListener("pointercancel", release);
     this.shadowRoot.addEventListener("change", (ev) => this._onChange(ev));
     this.shadowRoot.addEventListener("focusout", () => {
       if (this._deferredRender) setTimeout(() => this._render(), 0);
@@ -264,18 +277,44 @@ class SmartHeatingPlanerCard extends HTMLElement {
     }
   }
 
+  // Gewähltes Programm sofort anzeigen, bis das Thermostat beide Auswahlen bestätigt hat
+  _displayedProgram() {
+    const { activeGroup, editGroup } = this._entities;
+    const active = this._hass.states[activeGroup]?.state;
+    const edit = editGroup && this._hass.states[editGroup]?.state;
+    const p = this._pendingProgram;
+    if (p) {
+      const confirmed = active === p.group && (!editGroup || edit === p.group);
+      if (confirmed || Date.now() - p.at > PROGRAM_TIMEOUT_MS) {
+        this._pendingProgram = null;
+        if (!confirmed) this._message = { text: `Das Thermostat hat Programm ${p.group} nicht bestätigt. Bitte nochmal tippen.`, error: true };
+        else this._message = null;
+      } else {
+        return { group: p.group, pending: true };
+      }
+    }
+    return { group: active, pending: false };
+  }
+
   async _selectProgram(group) {
+    if (this._displayedProgram().group === group) return;
     if (this._dirtyDays().length && !confirm("Ungespeicherte Änderungen verwerfen und Programm wechseln?")) return;
     this._drafts = {};
+    this._pendingProgram = { group, at: Date.now() };
+    this._message = null;
+    this._render();
+    clearTimeout(this._programTimer);
+    this._programTimer = setTimeout(() => this._render(), PROGRAM_TIMEOUT_MS + 100);
     const { activeGroup, editGroup } = this._entities;
     try {
-      if (activeGroup) await this._call("select", "select_option", { entity_id: activeGroup, option: group });
-      if (editGroup) await this._call("select", "select_option", { entity_id: editGroup, option: group });
-      this._message = { text: `Programm ${group} ist aktiv. Der Plan wird vom Thermostat geladen …` };
+      // Beide Befehle gleichzeitig, damit sie im selben Aufwach-Fenster des Thermostats ankommen
+      await Promise.all(
+        [activeGroup, editGroup].filter(Boolean).map((id) => this._call("select", "select_option", { entity_id: id, option: group })),
+      );
     } catch (err) {
+      this._pendingProgram = null;
       this._showError(err);
     }
-    this._render();
   }
 
   async _editActiveProgram() {
@@ -454,14 +493,20 @@ class SmartHeatingPlanerCard extends HTMLElement {
       this._deferredRender = true;
       return;
     }
+    if (this._pointerDown) {
+      this._deferredRender = true;
+      return;
+    }
     this._deferredRender = false;
 
     const st = this._hass.states[this._config.entity];
-    if (!st) {
-      this.shadowRoot.innerHTML = `${STYLE}<ha-card><div class="warn">Entity ${esc(this._config.entity)} nicht gefunden.</div></ha-card>`;
-      return;
-    }
-    this.shadowRoot.innerHTML = `${STYLE}<ha-card>${this._renderThermostat(st)}${this._renderPlanner()}</ha-card>`;
+    const html = st
+      ? `${STYLE}<ha-card>${this._renderThermostat(st)}${this._renderPlanner()}</ha-card>`
+      : `${STYLE}<ha-card><div class="warn">Entity ${esc(this._config.entity)} nicht gefunden.</div></ha-card>`;
+    // Unveränderte Karte nicht neu aufbauen (Thermostat meldet sich oft mehrmals pro Sekunde)
+    if (html === this._lastHtml) return;
+    this._lastHtml = html;
+    this.shadowRoot.innerHTML = html;
   }
 
   _renderThermostat(st) {
@@ -571,13 +616,18 @@ class SmartHeatingPlanerCard extends HTMLElement {
     if (!active) return "";
     const options = active.attributes.options || [];
     const edit = editGroup && this._hass.states[editGroup]?.state;
-    const mismatch = edit && edit !== active.state;
+    const shown = this._displayedProgram();
+    const mismatch = !shown.pending && edit && edit !== active.state;
     return `
       <div class="programs">
         <span class="label">Programm</span>
         ${options
-          .map((o) => `<button class="chip ${active.state === o ? "on" : ""}" data-action="program" data-value="${esc(o)}">${esc(o)}</button>`)
+          .map(
+            (o) =>
+              `<button class="chip ${shown.group === o ? "on" : ""} ${shown.pending && shown.group === o ? "pending" : ""}" data-action="program" data-value="${esc(o)}">${esc(o)}</button>`,
+          )
           .join("")}
+        ${shown.pending ? `<span class="hint">wird übertragen …</span>` : ""}
       </div>
       ${
         mismatch
@@ -681,6 +731,9 @@ const STYLE = `<style>
   .programs .label { color: var(--secondary-text-color); margin-right: 4px; }
   .chip { min-height: 40px; min-width: 48px; padding: 0 14px; border-radius: 999px; background: var(--secondary-background-color); }
   .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+  .chip.pending { animation: shp-pulse 1s ease-in-out infinite; }
+  @keyframes shp-pulse { 50% { opacity: .55; } }
+  .programs .hint { font-size: 13px; color: var(--secondary-text-color); }
   .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
   .day { position: relative; min-height: var(--shp-touch); border-radius: 12px; background: var(--secondary-background-color); font-weight: 500; }
   .day.today { box-shadow: inset 0 0 0 2px var(--primary-color); }
