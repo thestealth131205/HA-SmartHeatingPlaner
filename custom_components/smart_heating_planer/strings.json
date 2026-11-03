@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Smart Heating Planer",
+        "description": "Installs the card „Smart Heating Planer“. Afterwards add it to a dashboard: Edit → Add card → search for „Smart Heating Planer“."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Smart Heating Planer is already set up."
+    }
+  }
+}
