@@ -17,7 +17,7 @@
  * die Karte bearbeitet sie nur über die Websocket-API smart_heating_planer/conditions/*.
  */
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 
 const DAYS = [
   { key: "monday", short: "Mo", long: "Montag" },
