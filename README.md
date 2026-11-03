@@ -17,6 +17,13 @@ Es gibt sie in zwei Varianten:
 | **Smart Heating Planer** (`custom:smart-heating-planer-card`) | Thermostat und Wochenplan untereinander |
 | **Smart Heating Planer (kompakt)** (`custom:smart-heating-planer-compact-card`) | nur das Thermostat. Ein Tipp auf die Temperatur zwischen − und + öffnet den Wochenplan als Detailansicht. Schließen mit ✕, Tipp daneben oder der Zurück-Taste. |
 
+<p align="center">
+  <img src="docs/screenshot-compact.png" alt="Kompakte Karte: nur das Thermostat mit Boost-Rakete" width="320">
+  &nbsp;
+  <img src="docs/screenshot-dialog.png" alt="Kompakte Karte mit geöffnetem Wochenplan-Dialog" width="480">
+</p>
+<p align="center"><em>Links die kompakte Karte, rechts der Wochenplan-Dialog nach einem Tipp auf die Temperatur.</em></p>
+
 **Thermostat (oberer Teil)**
 - Große Solltemperatur mit −/+-Knöpfen, darunter die Ist-Temperatur. Oben rechts steht, ob die Heizung gerade heizt oder im Leerlauf ist.
 - Mehrfaches Tippen auf −/+ wird gesammelt und als ein einziger Befehl gesendet. Das schont die Batterie des Thermostats.
@@ -69,7 +76,7 @@ Bei allen Thermostaten funktioniert der obere Teil der Karte (Temperatur und Mod
 
 ## Installation
 
-**HACS:** HACS → Benutzerdefinierte Repositories → Repo-URL mit Typ „Integration“ hinzufügen → „Smart Heating Planer“ installieren → Home Assistant neu starten.
+**HACS:** HACS → Benutzerdefinierte Repositories → `https://github.com/thestealth131205/HA-SmartHeatingPlaner` mit Typ „Integration“ hinzufügen → „Smart Heating Planer“ installieren → Home Assistant neu starten.
 
 **Manuell:** Den Ordner `custom_components/smart_heating_planer` nach `config/custom_components/` kopieren und Home Assistant neu starten.
 
