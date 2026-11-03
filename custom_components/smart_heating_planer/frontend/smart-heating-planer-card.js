@@ -6,9 +6,14 @@
  * Format pro Tag: "00:00/18 07:00/21 13:00/20 …", erster Schaltpunkt immer
  * 00:00. Wie viele Schaltpunkte und welcher Temperaturbereich erlaubt sind,
  * hängt vom Thermostat-Modell ab (siehe PROFILES).
+ *
+ * Zwei Karten:
+ *  - custom:smart-heating-planer-card          Thermostat + Wochenplan
+ *  - custom:smart-heating-planer-compact-card  nur Thermostat, Tipp auf die Temperatur öffnet den Wochenplan
+ * Beide zeigen unten rechts den Boost-Knopf (Rakete), sofern das Thermostat Boost kann.
  */
 
-const VERSION = "1.1.0";
+const VERSION = "1.2.0";
 
 const DAYS = [
   { key: "monday", short: "Mo", long: "Montag" },
@@ -40,6 +45,9 @@ const DEFAULT_PROFILE = { maxSlots: 6, min: 5, max: 30, pad: false };
 const SAVED_TIMEOUT_MS = 30000;
 const TARGET_DEBOUNCE_MS = 900;
 const PROGRAM_TIMEOUT_MS = 30000;
+const BOOST_TIMEOUT_MS = 30000;
+// Preset, auf das beim Beenden zurückgeschaltet wird, wenn der vorherige unbekannt ist
+const PRESET_FALLBACKS = ["none", "comfort", "home", "eco"];
 
 const HVAC_LABELS = { off: "Aus", auto: "Plan", heat: "Manuell" };
 const HVAC_ICONS = { off: "mdi:power", auto: "mdi:calendar-clock", heat: "mdi:hand-back-right" };
@@ -106,6 +114,9 @@ class SmartHeatingPlanerCard extends HTMLElement {
     this._watchKey = null;
     this._deferredRender = false;
     this._pendingProgram = null; // {group, at}
+    this._pendingBoost = null; // {value, at}
+    this._presetBeforeBoost = null;
+    this._compact = false;
     this._pointerDown = false;
     this._lastHtml = null;
     this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
@@ -185,6 +196,9 @@ class SmartHeatingPlanerCard extends HTMLElement {
         if (day && DAYS.some((d) => d.key === day[1])) out.days[day[1]] = id;
         else if (/^select\..*schedule_active_group$/.test(id)) out.activeGroup = id;
         else if (/^select\..*schedule_group_to_edit$/.test(id)) out.editGroup = id;
+        else if (/^switch\..*boost/.test(id)) out.boostSwitch = id;
+        else if (/^select\..*temporary_mode_mode$/.test(id)) out.boostSelect = id;
+        else if (/^sensor\..*boost.*countdown$/.test(id)) out.boostCountdown = id;
       }
     }
     // Fallback über den Namen, falls die Entity-Registry nichts liefert
@@ -197,12 +211,34 @@ class SmartHeatingPlanerCard extends HTMLElement {
       out.activeGroup = `select.${objectId}_schedule_active_group`;
     if (!out.editGroup && hass.states[`select.${objectId}_schedule_group_to_edit`])
       out.editGroup = `select.${objectId}_schedule_group_to_edit`;
+    if (!out.boostSwitch && hass.states[`switch.${objectId}_boost_heating`]) out.boostSwitch = `switch.${objectId}_boost_heating`;
+    if (!out.boostSelect && hass.states[`select.${objectId}_temporary_mode_mode`])
+      out.boostSelect = `select.${objectId}_temporary_mode_mode`;
+    if (!out.boostCountdown && hass.states[`sensor.${objectId}_boost_heating_countdown`])
+      out.boostCountdown = `sensor.${objectId}_boost_heating_countdown`;
+    out.boost = this._resolveBoost(out);
     return out;
+  }
+
+  // Boost je nach Thermostat: Schalter (Moes, Bosch …), Auswahl "temporary mode" (Sonoff) oder Preset "boost"
+  _resolveBoost(e) {
+    const states = this._hass.states;
+    const hasBoostOption = (id) => (states[id]?.attributes?.options || []).includes("boost");
+    const forced = this._config.boost_entity;
+    if (forced) {
+      if (forced.startsWith("select.")) return hasBoostOption(forced) ? { kind: "select", id: forced } : null;
+      if (/^(switch|input_boolean)\./.test(forced)) return { kind: "switch", id: forced };
+      return null;
+    }
+    if (e.boostSwitch) return { kind: "switch", id: e.boostSwitch };
+    if (e.boostSelect && hasBoostOption(e.boostSelect)) return { kind: "select", id: e.boostSelect };
+    if ((states[e.climate]?.attributes?.preset_modes || []).includes("boost")) return { kind: "preset", id: e.climate };
+    return null;
   }
 
   _computeWatchKey() {
     const e = this._entities;
-    const ids = [e.climate, ...Object.values(e.days), e.activeGroup, e.editGroup].filter(Boolean);
+    const ids = [e.climate, ...Object.values(e.days), e.activeGroup, e.editGroup, e.boost?.id, e.boostCountdown].filter(Boolean);
     return ids.map((id) => this._hass.states[id]?.last_updated ?? "-").join("|") + `|${new Date().getMinutes()}`;
   }
 
@@ -347,6 +383,62 @@ class SmartHeatingPlanerCard extends HTMLElement {
     }
   }
 
+  _boostActive() {
+    const b = this._entities.boost;
+    const st = b && this._hass.states[b.id];
+    if (!st) return false;
+    if (b.kind === "switch") return st.state === "on";
+    if (b.kind === "select") return st.state === "boost";
+    return st.attributes?.preset_mode === "boost";
+  }
+
+  // Boost sofort umschalten, bis das (oft schlafende) Thermostat den Wechsel bestätigt
+  _displayedBoost() {
+    const real = this._boostActive();
+    const p = this._pendingBoost;
+    if (p) {
+      const confirmed = real === p.value;
+      if (confirmed || Date.now() - p.at > BOOST_TIMEOUT_MS) {
+        this._pendingBoost = null;
+        if (!confirmed) this._message = { text: "Das Thermostat hat den Boost nicht bestätigt. Bitte nochmal tippen.", error: true };
+      } else {
+        return { on: p.value, pending: true };
+      }
+    }
+    return { on: real, pending: false };
+  }
+
+  async _toggleBoost() {
+    const b = this._entities.boost;
+    if (!b) return;
+    const on = !this._displayedBoost().on;
+    this._pendingBoost = { value: on, at: Date.now() };
+    this._message = null;
+    this._render();
+    clearTimeout(this._boostTimer);
+    this._boostTimer = setTimeout(() => this._render(), BOOST_TIMEOUT_MS + 100);
+    try {
+      if (b.kind === "switch") {
+        await this._call(b.id.split(".")[0], on ? "turn_on" : "turn_off", { entity_id: b.id });
+      } else if (b.kind === "select") {
+        const options = this._hass.states[b.id]?.attributes?.options || [];
+        const off = options.includes("disabled") ? "disabled" : options.find((o) => o !== "boost");
+        await this._call("select", "select_option", { entity_id: b.id, option: on ? "boost" : off });
+      } else {
+        const a = this._hass.states[b.id]?.attributes || {};
+        const presets = a.preset_modes || [];
+        if (on && a.preset_mode && a.preset_mode !== "boost") this._presetBeforeBoost = a.preset_mode;
+        const back = [this._presetBeforeBoost, ...PRESET_FALLBACKS].find((m) => m && presets.includes(m)) || presets.find((m) => m !== "boost");
+        await this._call("climate", "set_preset_mode", { entity_id: b.id, preset_mode: on ? "boost" : back });
+      }
+    } catch (err) {
+      this._pendingBoost = null;
+      this._showError(err);
+    }
+  }
+
+  _openPlanner() {}
+
   _addSlot() {
     const slots = this._editableSlots(this._day);
     if (!slots || slots.length >= this._entities.profile.maxSlots) return;
@@ -490,6 +582,8 @@ class SmartHeatingPlanerCard extends HTMLElement {
       case "discard": return this._discard();
       case "save": return this._save();
       case "more-info": return this._moreInfo();
+      case "boost": return this._toggleBoost();
+      case "open-planner": return this._openPlanner();
       case "dismiss":
         this._message = null;
         return this._render();
@@ -519,7 +613,9 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
     const st = this._hass.states[this._config.entity];
     const html = st
-      ? `${STYLE}<ha-card>${this._renderThermostat(st)}${this._renderPlanner()}</ha-card>`
+      ? `${STYLE}<ha-card class="${this._compact ? "compact" : ""}">${this._renderThermostat(st)}${
+          this._compact ? this._renderMessage() : this._renderPlanner()
+        }</ha-card>`
       : `${STYLE}<ha-card><div class="warn">Entity ${esc(this._config.entity)} nicht gefunden.</div></ha-card>`;
     // Unveränderte Karte nicht neu aufbauen (Thermostat meldet sich oft mehrmals pro Sekunde)
     if (html === this._lastHtml) return;
@@ -549,10 +645,12 @@ class SmartHeatingPlanerCard extends HTMLElement {
         <button class="round" data-action="target-down" ${isOff || unavailable ? "disabled" : ""} aria-label="Kälter">
           <ha-icon icon="mdi:minus"></ha-icon>
         </button>
-        <div class="target">
+        ${this._compact ? `<button class="target tap" data-action="open-planner" aria-label="Wochenplan öffnen">` : `<div class="target">`}
           <div class="big">${isOff ? "Aus" : `${fmtTemp(target)}<small>°C</small>`}</div>
-          <div class="current">Ist ${fmtTemp(a.current_temperature)} °C</div>
-        </div>
+          <div class="current">Ist ${fmtTemp(a.current_temperature)} °C${
+            this._compact ? ` <ha-icon class="hint-icon" icon="mdi:calendar-week"></ha-icon>` : ""
+          }</div>
+        ${this._compact ? `</button>` : `</div>`}
         <button class="round" data-action="target-up" ${isOff || unavailable ? "disabled" : ""} aria-label="Wärmer">
           <ha-icon icon="mdi:plus"></ha-icon>
         </button>
@@ -565,8 +663,36 @@ class SmartHeatingPlanerCard extends HTMLElement {
           )
           .join("")}
       </div>
-      ${st.state === "auto" && now ? `<div class="plan-now">${now}</div>` : ""}
+      ${this._renderFoot(st, now)}
     `;
+  }
+
+  // Zeile unter den Modus-Knöpfen: nächste Planänderung, rechts daneben die Boost-Rakete
+  _renderFoot(st, now) {
+    const b = this._entities.boost;
+    const plan = st.state === "auto" && now ? now : "";
+    if (!b) return plan ? `<div class="plan-now">${plan}</div>` : "";
+    // Nur sperren, wenn die Boost-Entity selbst weg ist – das Thermostat kann noch "unbekannt" melden
+    const unavailable = this._hass.states[b.id]?.state === "unavailable";
+    const shown = this._displayedBoost();
+    const cd = shown.on && this._entities.boostCountdown && this._hass.states[this._entities.boostCountdown];
+    const left = cd && Number(cd.state) > 0 ? `${cd.state} ${cd.attributes.unit_of_measurement || ""}`.trim() : "";
+    return `
+      <div class="foot">
+        <span></span>
+        <div class="plan-now">${plan}</div>
+        <button class="boost ${shown.on ? "on" : ""} ${shown.pending ? "pending" : ""}" data-action="boost"
+          aria-pressed="${shown.on}" title="${shown.on ? "Boost beenden" : "Boost starten"}" ${unavailable ? "disabled" : ""}>
+          <ha-icon icon="mdi:rocket-launch"></ha-icon>${left ? `<span>${esc(left)}</span>` : ""}
+        </button>
+      </div>
+    `;
+  }
+
+  _renderMessage() {
+    return this._message
+      ? `<div class="msg ${this._message.error ? "error" : ""}" data-action="dismiss">${esc(this._message.text)}</div>`
+      : "";
   }
 
   _planNow() {
@@ -585,7 +711,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _renderPlanner() {
     const e = this._entities;
     if (!Object.keys(e.days).length) {
-      return `<div class="warn">Für dieses Thermostat wurden keine Wochenplan-Entities (text.*_weekly_schedule_*) gefunden.</div>`;
+      return `<div class="warn">Für dieses Thermostat wurden keine Wochenplan-Entities (text.*_weekly_schedule_*) gefunden.</div>${this._renderMessage()}`;
     }
     const today = JS_DAY[new Date().getDay()];
     const slots = this._slots(this._day);
@@ -614,7 +740,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
              ${this._copyOpen ? this._renderCopy() : ""}`
           : `<div class="warn">Plan für ${esc(dayLong)} ist (noch) nicht bekannt. Das Thermostat meldet ihn beim nächsten Aufwachen.</div>`
       }
-      ${this._message ? `<div class="msg ${this._message.error ? "error" : ""}" data-action="dismiss">${esc(this._message.text)}</div>` : ""}
+      ${this._renderMessage()}
       ${
         dirty.length || this._saving
           ? `<div class="savebar">
@@ -744,6 +870,17 @@ const STYLE = `<style>
   .mode { min-height: var(--shp-touch); border-radius: var(--shp-radius); background: var(--secondary-background-color); display: flex; align-items: center; justify-content: center; gap: 6px; }
   .mode.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
   .plan-now { text-align: center; font-size: .9rem; color: var(--secondary-text-color); }
+  .foot { display: grid; grid-template-columns: minmax(48px, auto) 1fr minmax(48px, auto); align-items: center; gap: 4px; margin: -4px 0 -6px; }
+  .boost { justify-self: end; min-width: 48px; height: 48px; padding: 0 12px; border-radius: 999px; display: flex; align-items: center; justify-content: center; gap: 4px;
+    color: var(--shp-boost-off-color, var(--primary-text-color)); font-size: .85rem; font-weight: 500; transition: color .2s, background .2s; }
+  .boost ha-icon { --mdc-icon-size: 26px; }
+  .boost.on { color: var(--shp-boost-on-color, #ff5a1f); background: rgba(255, 90, 31, .16); }
+  .boost.on ha-icon { filter: drop-shadow(0 0 6px rgba(255, 90, 31, .7)); }
+  .boost.pending { animation: shp-pulse 1s ease-in-out infinite; }
+  .boost:active:not(:disabled) { transform: scale(.92); }
+  .target.tap { border-radius: var(--shp-radius); padding: 6px 0; }
+  .target.tap:active { background: var(--secondary-background-color); }
+  .hint-icon { --mdc-icon-size: 16px; vertical-align: -2px; margin-left: 4px; opacity: .8; }
   .section-title { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--divider-color); font-weight: 500; font-size: 1.05rem; }
   .programs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .programs .label { color: var(--secondary-text-color); margin-right: 4px; }
@@ -806,13 +943,20 @@ class SmartHeatingPlanerCardEditor extends HTMLElement {
         { name: "entity", required: true, selector: { entity: { domain: "climate" } } },
         { name: "name", selector: { text: {} } },
         { name: "max_slots", selector: { number: { min: 1, max: 12, mode: "box" } } },
+        { name: "boost_entity", selector: { entity: { domain: ["switch", "select", "input_boolean"] } } },
       ];
       this._form.computeLabel = (s) =>
-        ({ entity: "Thermostat", name: "Name (optional)", max_slots: "Max. Schaltpunkte pro Tag (optional, sonst automatisch)" })[s.name];
+        ({
+          entity: "Thermostat",
+          name: "Name (optional)",
+          max_slots: "Max. Schaltpunkte pro Tag (optional, sonst automatisch)",
+          boost_entity: "Boost-Entity (optional, sonst automatisch)",
+        })[s.name];
       this._form.addEventListener("value-changed", (ev) => {
         const config = { ...this._config, ...ev.detail.value };
         if (!config.name) delete config.name;
         if (!config.max_slots) delete config.max_slots;
+        if (!config.boost_entity) delete config.boost_entity;
         this._config = config;
         this.dispatchEvent(new CustomEvent("config-changed", { detail: { config }, bubbles: true, composed: true }));
       });
@@ -823,14 +967,145 @@ class SmartHeatingPlanerCardEditor extends HTMLElement {
   }
 }
 
+/** Nur der Thermostat-Teil. Tipp auf die Temperatur öffnet den Wochenplan als Dialog. */
+class SmartHeatingPlanerCompactCard extends SmartHeatingPlanerCard {
+  constructor() {
+    super();
+    this._compact = true;
+    this._dialog = null;
+  }
+
+  set hass(hass) {
+    if (this._dialog) this._dialog.hass = hass;
+    super.hass = hass;
+  }
+
+  get hass() {
+    return super.hass;
+  }
+
+  getCardSize() {
+    return 4;
+  }
+
+  disconnectedCallback() {
+    this._dialog?.close(true);
+  }
+
+  _openPlanner() {
+    if (this._dialog || !this._hass) return;
+    const dialog = document.createElement("smart-heating-planer-dialog");
+    dialog.setup(this._config, this._hass, this);
+    dialog.addEventListener("shp-closed", () => (this._dialog = null));
+    this._dialog = dialog;
+    // Am body, damit der Dialog nicht von Dashboard-Spalten abgeschnitten wird
+    document.body.appendChild(dialog);
+  }
+}
+
+/** Vollbild-Dialog mit der vollständigen Karte. Schließen per ✕, Tipp daneben, Esc oder Zurück-Taste. */
+class SmartHeatingPlanerDialog extends HTMLElement {
+  setup(config, hass, origin) {
+    this._config = config;
+    this._hass = hass;
+    this._origin = origin;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (this._card) this._card.hass = hass;
+  }
+
+  connectedCallback() {
+    if (this._card) return;
+    const root = this.attachShadow({ mode: "open" });
+    root.innerHTML = `${DIALOG_STYLE}
+      <div class="backdrop"></div>
+      <div class="panel" role="dialog" aria-modal="true" aria-label="Wochenplan">
+        <div class="bar"><span>Wochenplan</span>
+          <button class="close" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button></div>
+      </div>`;
+    this._card = document.createElement("smart-heating-planer-card");
+    this._card.setConfig(this._config);
+    this._card.hass = this._hass;
+    root.querySelector(".panel").appendChild(this._card);
+    root.querySelector(".backdrop").addEventListener("click", () => this.close());
+    root.querySelector(".close").addEventListener("click", () => this.close());
+    // Details-Dialog von HA kann aus dem body heraus nicht geöffnet werden – über die Ursprungskarte weiterreichen
+    this.addEventListener("hass-more-info", (ev) => {
+      ev.stopPropagation();
+      const origin = this._origin;
+      const fire = () => origin?.dispatchEvent(new CustomEvent("hass-more-info", { detail: ev.detail, bubbles: true, composed: true }));
+      const viaBack = history.state?.shpPlaner;
+      if (!this.close()) return;
+      if (!viaBack) return fire();
+      // Erst nach dem Zurück-Schritt öffnen, sonst schließt HA seinen Dialog gleich wieder
+      const once = () => {
+        clearTimeout(timer);
+        fire();
+      };
+      const timer = setTimeout(() => {
+        window.removeEventListener("popstate", once);
+        fire();
+      }, 500);
+      window.addEventListener("popstate", once, { once: true });
+    });
+    this._onKey = (ev) => ev.key === "Escape" && this.close();
+    document.addEventListener("keydown", this._onKey);
+    // Zurück-Taste (Android) schließt den Dialog statt das Dashboard zu verlassen
+    history.pushState({ ...(history.state || {}), shpPlaner: true }, "");
+    this._onPop = () => this.close(false, true);
+    window.addEventListener("popstate", this._onPop);
+  }
+
+  close(force = false, fromPop = false) {
+    if (this._closed) return true;
+    if (!force && this._card?._dirtyDays().length && !confirm("Ungespeicherte Änderungen am Wochenplan verwerfen?")) {
+      if (fromPop) history.pushState({ ...(history.state || {}), shpPlaner: true }, "");
+      return false;
+    }
+    this._closed = true;
+    document.removeEventListener("keydown", this._onKey);
+    window.removeEventListener("popstate", this._onPop);
+    if (!fromPop && history.state?.shpPlaner) history.back();
+    this.remove();
+    this.dispatchEvent(new CustomEvent("shp-closed"));
+    return true;
+  }
+}
+
+const DIALOG_STYLE = `<style>
+  :host { position: fixed; inset: 0; z-index: 9; display: flex; align-items: center; justify-content: center; }
+  .backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .55); animation: shp-fade .15s ease-out; }
+  .panel { position: relative; width: min(560px, 100%); max-height: 100%; max-height: 100dvh; overflow-y: auto; overscroll-behavior: contain;
+    background: var(--ha-card-background, var(--card-background-color, #1c1c1c)); color: var(--primary-text-color);
+    border-radius: 16px; box-shadow: 0 8px 32px rgba(0, 0, 0, .5); animation: shp-up .18s ease-out; }
+  .bar { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; padding: 6px 6px 0 16px;
+    background: inherit; font-weight: 500; font-size: 1.05rem; }
+  .close { width: 48px; height: 48px; border-radius: 50%; display: grid; place-items: center; border: none; background: none; color: inherit; cursor: pointer; }
+  .close ha-icon { --mdc-icon-size: 26px; }
+  @media (max-width: 600px) { .panel { width: 100%; height: 100%; max-height: none; border-radius: 0; } }
+  @keyframes shp-fade { from { opacity: 0; } }
+  @keyframes shp-up { from { transform: translateY(24px); opacity: 0; } }
+</style>`;
+
 if (!customElements.get("smart-heating-planer-card")) {
   customElements.define("smart-heating-planer-card", SmartHeatingPlanerCard);
+  customElements.define("smart-heating-planer-compact-card", SmartHeatingPlanerCompactCard);
+  customElements.define("smart-heating-planer-dialog", SmartHeatingPlanerDialog);
   customElements.define("smart-heating-planer-card-editor", SmartHeatingPlanerCardEditor);
   window.customCards = window.customCards || [];
   window.customCards.push({
     type: "smart-heating-planer-card",
     name: "Smart Heating Planer",
     description: "Thermostat mit Wochenplan zum Antippen (Zigbee2MQTT)",
+    preview: true,
+    documentationURL: "https://github.com/thestealth131205/HA-SmartHeatingPlaner",
+  });
+  window.customCards.push({
+    type: "smart-heating-planer-compact-card",
+    name: "Smart Heating Planer (kompakt)",
+    description: "Nur Thermostat, Tipp auf die Temperatur öffnet den Wochenplan",
     preview: true,
     documentationURL: "https://github.com/thestealth131205/HA-SmartHeatingPlaner",
   });

@@ -8,13 +8,26 @@ Eine Home-Assistant-Integration mit einer Thermostat-Karte, in der man den Woche
 
 ## Funktionen
 
-Die Karte ist für die Bedienung mit dem Finger gebaut: große Knöpfe, keine Dialoge, keine YAML-Bearbeitung.
+Die Karte ist für die Bedienung mit dem Finger gebaut: große Knöpfe, keine YAML-Bearbeitung.
+
+Es gibt sie in zwei Varianten:
+
+| Karte | Inhalt |
+|---|---|
+| **Smart Heating Planer** (`custom:smart-heating-planer-card`) | Thermostat und Wochenplan untereinander |
+| **Smart Heating Planer (kompakt)** (`custom:smart-heating-planer-compact-card`) | nur das Thermostat. Ein Tipp auf die Temperatur zwischen − und + öffnet den Wochenplan als Detailansicht. Schließen mit ✕, Tipp daneben oder der Zurück-Taste. |
 
 **Thermostat (oberer Teil)**
 - Große Solltemperatur mit −/+-Knöpfen, darunter die Ist-Temperatur. Oben rechts steht, ob die Heizung gerade heizt oder im Leerlauf ist.
 - Mehrfaches Tippen auf −/+ wird gesammelt und als ein einziger Befehl gesendet. Das schont die Batterie des Thermostats.
 - Modus **Aus**, **Plan** (Auto, das Thermostat folgt dem Wochenplan) oder **Manuell** (feste Temperatur).
 - Im Plan-Modus steht darunter, was gerade gilt, z. B. „Laut Plan 21 °C bis 13:00, danach 20 °C“.
+- **Boost (Rakete unten rechts):** weiß = aus, orange-rot = Boost läuft. Ein Tipp startet oder beendet ihn. Meldet das Thermostat eine Restzeit, steht sie neben der Rakete. Die Karte erkennt den Boost automatisch:
+  - Schalter `switch.*boost*` (z. B. Moes BRT-100, Bosch BTH-RA)
+  - Auswahl `select.*_temporary_mode_mode` mit Option `boost` (SONOFF TRV-ZBT/TRV-ZBL/TRVZB, Boost-Dauer stellt man am Gerät bzw. über `number.*_temporary_mode_duration` ein)
+  - Preset `boost` des Thermostats (viele andere Integrationen)
+  
+  Ohne Boost-Funktion bleibt die Rakete weg. Mit `boost_entity` lässt sich die Entity von Hand festlegen.
 
 **Wochenplan (unterer Teil)**
 - **Programm 1 / 2 / 3:** Bei Thermostaten mit mehreren Programmen wird das aktive Programm mit einem Tipp umgeschaltet. Der Knopf ist sofort markiert und pulsiert, bis das Thermostat bestätigt.
@@ -69,10 +82,11 @@ Danach: Einstellungen → Geräte & Dienste → Integration hinzufügen → **Sm
 Dashboard bearbeiten → Karte hinzufügen → „Smart Heating Planer“ suchen, oder per YAML:
 
 ```yaml
-type: custom:smart-heating-planer-card
+type: custom:smart-heating-planer-card          # oder custom:smart-heating-planer-compact-card
 entity: climate.heizung
-name: Wohnzimmer   # optional
-max_slots: 6       # optional, nur für Thermostate, die die Karte nicht kennt
+name: Wohnzimmer                                # optional
+max_slots: 6                                    # optional, nur für Thermostate, die die Karte nicht kennt
+boost_entity: switch.heizung_boost_heating      # optional, sonst automatisch
 ```
 
 Die Wochenplan- und Programm-Entities werden automatisch über das Gerät des Thermostats gefunden.
