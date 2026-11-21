@@ -1,52 +1,109 @@
 /*
- * Smart Heating Planer – Thermostat-Karte mit Wochenplan zum Antippen.
+ * Smart Heating Planer – thermostat card with a tap-to-edit weekly schedule.
  *
- * Liest und schreibt den Wochenplan direkt im Thermostat über die
- * Zigbee2MQTT-Entities text.<name>_weekly_schedule_<tag>.
- * Format pro Tag: "00:00/18 07:00/21 13:00/20 …", erster Schaltpunkt immer
- * 00:00. Wie viele Schaltpunkte und welcher Temperaturbereich erlaubt sind,
- * hängt vom Thermostat-Modell ab (siehe PROFILES).
+ * Reads and writes the weekly schedule directly on the thermostat via the
+ * Zigbee2MQTT entities text.<name>_weekly_schedule_<day>.
+ * Format per day: "00:00/18 07:00/21 13:00/20 …", the first switching point is always
+ * 00:00. How many switching points and which temperature range are allowed
+ * depends on the thermostat model (see PROFILES).
  *
- * Zwei Karten:
- *  - custom:smart-heating-planer-card          Thermostat + Wochenplan
- *  - custom:smart-heating-planer-compact-card  nur Thermostat, Tipp auf die Temperatur öffnet den Wochenplan
- * Beide zeigen unten rechts den Boost-Knopf (Rakete), sofern das Thermostat Boost kann.
+ * Two cards:
+ *  - custom:smart-heating-planer-card          thermostat + weekly schedule
+ *  - custom:smart-heating-planer-compact-card  thermostat only, tapping the temperature opens the weekly schedule
+ * Both show the boost button (rocket) at the bottom right if the thermostat supports boost.
  *
- * Bedingungen (ab 1.3.0): "Wenn Entity X = Wert, dann Manuell/Aus, optional Boost,
- * optional zurücksetzen". Ausgewertet werden sie in der Integration (conditions.py),
- * die Karte bearbeitet sie nur über die Websocket-API smart_heating_planer/conditions/*.
+ * Conditions (since 1.3.0): "If entity X = value, then manual/off, optional boost,
+ * optional reset". They are evaluated in the integration (conditions.py),
+ * the card only edits them via the websocket API smart_heating_planer/conditions/*.
  *
- * Zwei Thermostate koppeln (ab 1.4.0), zwei Varianten:
- *  - "Ohne Gruppe": im Karten-Editor ein zweites Thermostat (entity2) angeben.
- *    Reine Karten-Logik, keine neue Entity – Temperatur/Modus/Boost/Wochenplan
- *    gehen an beide Thermostate, angezeigt wird der Zustand des ersten.
- *  - "Mit Gruppe": Abschnitt "Thermostat-Gruppen" unten in der Karte, legt über
- *    die Integration (couplings.py) eine echte climate-Entity an, die beide
- *    Thermostate zusammenfasst (Attribut smart_heating_planer_group) – nutzbar
- *    überall in Home Assistant, nicht nur in dieser Karte. Zeigt man damit als
- *    "entity" in dieser Karte an, löst die Karte die Mitglieder automatisch auf.
+ * Coupling two thermostats (since 1.4.0), two variants:
+ *  - "Without group": specify a second thermostat (entity2) in the card editor.
+ *    Pure card logic, no new entity – temperature/mode/boost/weekly schedule
+ *    go to both thermostats, the state of the first one is displayed.
+ *  - "With group": "Thermostat groups" section at the bottom of the card, creates
+ *    a real climate entity via the integration (couplings.py) that combines both
+ *    thermostats (attribute smart_heating_planer_group) – usable anywhere in
+ *    Home Assistant, not just in this card. If it is shown as the
+ *    "entity" in this card, the card resolves the members automatically.
  */
 
-const VERSION = "1.4.0";
+const VERSION = "1.4.2";
 
-const DAYS = [
-  { key: "monday", short: "Mo", long: "Montag" },
-  { key: "tuesday", short: "Di", long: "Dienstag" },
-  { key: "wednesday", short: "Mi", long: "Mittwoch" },
-  { key: "thursday", short: "Do", long: "Donnerstag" },
-  { key: "friday", short: "Fr", long: "Freitag" },
-  { key: "saturday", short: "Sa", long: "Samstag" },
-  { key: "sunday", short: "So", long: "Sonntag" },
-];
-// Index wie Date.getDay(): 0 = Sonntag
+// ---------- Translations ----------
+// Texts live in translations/card/<language>.json and are loaded at runtime
+// (kept out of translations/<language>.json, which is reserved for the HA config flow).
+// The language follows hass.language; English is used when no matching file exists.
+const I18N_BASE = "/smart_heating_planer_translations/card";
+const SUPPORTED_LANGS = ["en", "de", "cs", "sk", "pl", "fr"];
+const DICTS = {}; // language → {key: text}; null = loading failed
+const LOADING = {};
+let LANG = "en";
+
+function loadLang(lang) {
+  if (!(lang in LOADING)) {
+    LOADING[lang] = fetch(`${I18N_BASE}/${lang}.json?v=${VERSION}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.statusText))))
+      .then((json) => (DICTS[lang] = json))
+      .catch(() => (DICTS[lang] = null));
+  }
+  return LOADING[lang];
+}
+
+// Picks the language from hass.language ("de", "cs", "pt-BR" …), loads English + target language
+// and calls onReady once both are available
+let NOTIFY = new Set();
+function setLang(language, onReady) {
+  const base = String(language || "en").toLowerCase().split("-")[0];
+  const lang = SUPPORTED_LANGS.includes(base) ? base : "en";
+  const changed = lang !== LANG;
+  LANG = lang;
+  if (i18nReady()) return changed && onReady?.();
+  if (onReady) NOTIFY.add(onReady);
+  Promise.all([loadLang("en"), loadLang(lang)]).then(() => {
+    const cbs = NOTIFY;
+    NOTIFY = new Set();
+    cbs.forEach((cb) => i18nReady() && cb());
+  });
+}
+const i18nReady = () => "en" in DICTS && LANG in DICTS;
+
+function tr(key, params) {
+  let s = DICTS[LANG]?.[key] ?? DICTS.en?.[key] ?? key;
+  if (params) for (const [k, v] of Object.entries(params)) s = s.split(`{${k}}`).join(v);
+  return s;
+}
+// Singular/plural variant (key.one / key.few / key.other) depending on the language
+function tn(key, n, params) {
+  const cat = new Intl.PluralRules(LANG).select(n);
+  const k = DICTS[LANG]?.[`${key}.${cat}`] ? `${key}.${cat}` : `${key}.other`;
+  return tr(k, { n, ...params });
+}
+// Server errors arrive as codes ("srv_<name>") and are translated here; anything else is shown as-is
+function errText(err) {
+  const msg = err?.message || err;
+  const key = typeof msg === "string" && msg.startsWith("srv_") ? `err.${msg}` : null;
+  return key && (DICTS[LANG]?.[key] || DICTS.en?.[key]) ? tr(key) : tr("err.generic", { msg });
+}
+
+
+const DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"].map((key) => ({
+  key,
+  get short() {
+    return tr(`day.${key}.short`);
+  },
+  get long() {
+    return tr(`day.${key}.long`);
+  },
+}));
+// Index like Date.getDay(): 0 = Sunday
 const JS_DAY = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
 const WORKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 const WEEKEND = ["saturday", "sunday"];
 
 const TEMP_STEP = 0.5;
 
-// Grenzen je Modell, wie sie die Zigbee2MQTT-Konverter prüfen (model_id aus der Geräte-Registry).
-// pad: Tages-String auf maxSlots mit dem letzten Schaltpunkt auffüllen, so meldet ihn das Gerät selbst.
+// Limits per model, as checked by the Zigbee2MQTT converters (model_id from the device registry).
+// pad: pad the day string to maxSlots with the last switching point, which is how the device reports it.
 const PROFILES = {
   "TRV-ZBT": { maxSlots: 12, min: 5, max: 30, pad: true },
   "TRV-ZBL": { maxSlots: 12, min: 5, max: 30, pad: true },
@@ -60,39 +117,29 @@ const SAVED_TIMEOUT_MS = 30000;
 const TARGET_DEBOUNCE_MS = 900;
 const PROGRAM_TIMEOUT_MS = 30000;
 const BOOST_TIMEOUT_MS = 30000;
-// Preset, auf das beim Beenden zurückgeschaltet wird, wenn der vorherige unbekannt ist
+// Preset to switch back to on exit when the previous one is unknown
 const PRESET_FALLBACKS = ["none", "comfort", "home", "eco"];
 
-const HVAC_LABELS = { off: "Aus", auto: "Plan", heat: "Manuell" };
+const HVAC_MODES = ["off", "auto", "heat"];
 const HVAC_ICONS = { off: "mdi:power", auto: "mdi:calendar-clock", heat: "mdi:hand-back-right" };
-const ACTION_LABELS = { heating: "Heizt", idle: "Leerlauf", off: "Aus", preheating: "Vorheizen" };
+const ACTION_KEYS = ["heating", "idle", "off", "preheating"];
 
 // Bedingungen
-const COND_DOMAINS = {
-  binary_sensor: "Binärsensoren",
-  sensor: "Sensoren",
-  switch: "Schalter",
-  light: "Lichter",
-  input_boolean: "Helfer (Schalter)",
-  input_number: "Helfer (Zahl)",
-  input_select: "Helfer (Auswahl)",
-  select: "Auswahl",
-  person: "Personen",
-  device_tracker: "Geräte-Tracker",
-  media_player: "Medien",
-  sun: "Sonne",
-};
+const COND_DOMAINS = [
+  "binary_sensor", "sensor", "switch", "light", "input_boolean", "input_number",
+  "input_select", "select", "person", "device_tracker", "media_player", "sun",
+];
 const ON_OFF_DOMAINS = ["binary_sensor", "switch", "light", "input_boolean", "fan"];
 const ON_OFF_LABELS = {
-  presence: ["erkannt", "nicht erkannt"],
-  occupancy: ["erkannt", "nicht erkannt"],
-  motion: ["erkannt", "nicht erkannt"],
-  door: ["offen", "geschlossen"],
-  window: ["offen", "geschlossen"],
-  opening: ["offen", "geschlossen"],
-  garage_door: ["offen", "geschlossen"],
-  moisture: ["nass", "trocken"],
-  connectivity: ["verbunden", "getrennt"],
+  presence: ["detected", "not_detected"],
+  occupancy: ["detected", "not_detected"],
+  motion: ["detected", "not_detected"],
+  door: ["open", "closed"],
+  window: ["open", "closed"],
+  opening: ["open", "closed"],
+  garage_door: ["open", "closed"],
+  moisture: ["wet", "dry"],
+  connectivity: ["connected", "disconnected"],
 };
 const OPERATOR_LABELS = { eq: "=", ne: "≠", gt: ">", lt: "<" };
 
@@ -106,7 +153,7 @@ const toMinutes = (s) => {
 };
 const clampTemp = (t, p) => Math.min(p.max, Math.max(p.min, Math.round(t / TEMP_STEP) * TEMP_STEP));
 const fmtTemp = (t) =>
-  t == null || isNaN(t) ? "–" : Number(t).toLocaleString("de-DE", { minimumFractionDigits: Number(t) % 1 ? 1 : 0, maximumFractionDigits: 1 });
+  t == null || isNaN(t) ? "–" : Number(t).toLocaleString(LANG, { minimumFractionDigits: Number(t) % 1 ? 1 : 0, maximumFractionDigits: 1 });
 const esc = (s) =>
   String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 
@@ -128,13 +175,13 @@ function parseSchedule(str) {
   }
   const slots = [...byTime].map(([t, temp]) => ({ t, temp })).sort((a, b) => a.t - b.t);
   if (!slots.length) return null;
-  // Manche Thermostate (z. B. Bosch) erlauben einen Tag ohne 00:00. Die Nacht läuft dann mit
-  // der letzten Temperatur weiter, die Karte zeigt sie als festen 00:00-Schaltpunkt.
+  // Some thermostats (e.g. Bosch) allow a day without 00:00. The night then continues with
+  // the last temperature, and the card shows it as a fixed 00:00 switching point.
   if (slots[0].t !== 0) slots.unshift({ t: 0, temp: slots[slots.length - 1].temp });
   return slots;
 }
 
-/** [{t, temp}] → Tages-String, bei pad aufgefüllt auf maxSlots (wie das Thermostat ihn selbst meldet). */
+/** [{t, temp}] → day string, padded to maxSlots when pad is set (as the thermostat reports it itself). */
 function serializeSchedule(slots, profile) {
   const parts = [...slots].sort((a, b) => a.t - b.t).map((s) => `${toHHMM(s.t)}/${s.temp}`);
   if (profile.pad) while (parts.length < profile.maxSlots) parts.push(parts[parts.length - 1]);
@@ -162,17 +209,17 @@ class SmartHeatingPlanerCard extends HTMLElement {
     this._compact = false;
     this._pointerDown = false;
     this._lastHtml = null;
-    this._rules = null; // null = Integration liefert (noch) keine Bedingungen
+    this._rules = null; // null = integration provides no conditions (yet)
     this._ruleDraft = null;
     this._condMessage = null;
     this._condBusy = false;
-    this._couplings = null; // null = Integration liefert (noch) keine Gruppen
+    this._couplings = null; // null = integration provides no groups (yet)
     this._couplingDraft = null;
     this._couplingMessage = null;
     this._couplingBusy = false;
     this.shadowRoot.addEventListener("click", (ev) => this._onClick(ev));
-    // Nicht neu zeichnen, solange ein Finger auf der Karte liegt – sonst wird der Knopf
-    // zwischen Antippen und Loslassen ersetzt und der Tipp geht verloren
+    // Don't re-render while a finger is on the card – otherwise the button is replaced
+    // between touch and release and the tap is lost
     this.shadowRoot.addEventListener("pointerdown", () => (this._pointerDown = true));
     const release = () => {
       this._pointerDown = false;
@@ -197,10 +244,10 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   setConfig(config) {
     if (!config || !config.entity || !String(config.entity).startsWith("climate.")) {
-      throw new Error("Bitte ein Thermostat (climate.*) als entity angeben");
+      throw new Error(tr("err.entity"));
     }
     if (config.entity2 && (!String(config.entity2).startsWith("climate.") || config.entity2 === config.entity)) {
-      throw new Error("entity2 muss ein anderes Thermostat (climate.*) sein");
+      throw new Error(tr("err.entity2"));
     }
     this._config = { ...config };
     this._watchKey = null;
@@ -219,6 +266,10 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    setLang(hass.language, (this._onLang ||= () => {
+      this._lastHtml = null;
+      if (this._entities) this._render();
+    }));
     this._subscribeConditions();
     this._subscribeCouplings();
     if (!this._config) return;
@@ -244,10 +295,10 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   // ---------- Entities ----------
 
-  // Gekoppelt: "mit Gruppe" (echte climate-Gruppen-Entity, Mitglieder über ihr
-  // Attribut entity_id) oder "ohne Gruppe" (entity2 im Karten-Editor). In beiden
-  // Fällen zeigt die Karte den Zustand des ersten Mitglieds an, Wochenplan/Boost
-  // gehen an alle Mitglieder, Thermostat-Befehle an controlTargets.
+  // Coupled: "with group" (real climate group entity, members via its
+  // entity_id attribute) or "without group" (entity2 in the card editor). In both
+  // cases the card shows the state of the first member; weekly schedule/boost
+  // go to all members, thermostat commands go to controlTargets.
   _findEntities() {
     const hass = this._hass;
     const climate = this._config.entity;
@@ -296,7 +347,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
         else if (/^sensor\..*boost.*countdown$/.test(id)) out.boostCountdown = id;
       }
     }
-    // Fallback über den Namen, falls die Entity-Registry nichts liefert
+    // Fall back to the name if the entity registry returns nothing
     const objectId = climate.split(".")[1];
     for (const d of DAYS) {
       const guess = `text.${objectId}_weekly_schedule_${d.key}`;
@@ -315,7 +366,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     return out;
   }
 
-  // Boost je nach Thermostat: Schalter (Moes, Bosch …), Auswahl "temporary mode" (Sonoff) oder Preset "boost"
+  // Boost depends on the thermostat: switch (Moes, Bosch …), select "temporary mode" (Sonoff) or preset "boost"
   _resolveBoost(e, isPrimary) {
     const states = this._hass.states;
     const hasBoostOption = (id) => (states[id]?.attributes?.options || []).includes("boost");
@@ -335,7 +386,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const e = this._entities;
     const memberIds = e.members.flatMap((m) => [m.climate, ...Object.values(m.days), m.activeGroup, m.editGroup, m.boost?.id, m.boostCountdown]);
     const ids = [...new Set([e.climate, ...memberIds].filter(Boolean))];
-    return ids.map((id) => this._hass.states[id]?.last_updated ?? "-").join("|") + `|${new Date().getMinutes()}`;
+    return ids.map((id) => this._hass.states[id]?.last_updated ?? "-").join("|") + `|${new Date().getMinutes()}|${LANG}`;
   }
 
   _deviceSlots(day) {
@@ -377,7 +428,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
         if (device && serializeSchedule(device, this._entities.profile) === serializeSchedule(draft.slots, this._entities.profile)) delete this._drafts[day];
         else if (Date.now() - draft.savedAt > SAVED_TIMEOUT_MS) {
           delete this._drafts[day];
-          this._message = { text: "Das Thermostat hat den neuen Plan nicht bestätigt. Bitte nochmal speichern.", error: true };
+          this._message = { text: tr("err.plan_unconfirmed"), error: true };
         }
       } else if (!this._isDirty(day)) {
         delete this._drafts[day];
@@ -410,7 +461,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const next = Math.min(max, Math.max(min, Math.round((cur + delta * step) / step) * step));
     this._pendingTarget = { value: next, at: Date.now() };
     clearTimeout(this._targetTimer);
-    // Mehrfaches Tippen sammeln, damit das batteriebetriebene Thermostat nur einen Befehl bekommt
+    // Collect multiple taps so the battery-powered thermostat receives only one command
     this._targetTimer = setTimeout(() => {
       this._call("climate", "set_temperature", { entity_id: this._entities.controlTargets, temperature: next }).catch((err) =>
         this._showError(err),
@@ -427,7 +478,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     }
   }
 
-  // Gewähltes Programm sofort anzeigen, bis das Thermostat beide Auswahlen bestätigt hat
+  // Show the chosen program immediately until the thermostat has confirmed both selections
   _displayedProgram() {
     const { activeGroup, editGroup } = this._entities;
     const active = this._hass.states[activeGroup]?.state;
@@ -437,7 +488,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
       const confirmed = active === p.group && (!editGroup || edit === p.group);
       if (confirmed || Date.now() - p.at > PROGRAM_TIMEOUT_MS) {
         this._pendingProgram = null;
-        if (!confirmed) this._message = { text: `Das Thermostat hat Programm ${p.group} nicht bestätigt. Bitte nochmal tippen.`, error: true };
+        if (!confirmed) this._message = { text: tr("err.program_unconfirmed", { group: p.group }), error: true };
         else this._message = null;
       } else {
         return { group: p.group, pending: true };
@@ -448,7 +499,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   async _selectProgram(group) {
     if (this._displayedProgram().group === group) return;
-    if (this._dirtyDays().length && !confirm("Ungespeicherte Änderungen verwerfen und Programm wechseln?")) return;
+    if (this._dirtyDays().length && !confirm(tr("confirm.switch_program"))) return;
     this._drafts = {};
     this._pendingProgram = { group, at: Date.now() };
     this._message = null;
@@ -488,7 +539,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     return st.attributes?.preset_mode === "boost";
   }
 
-  // Boost sofort umschalten, bis das (oft schlafende) Thermostat den Wechsel bestätigt
+  // Toggle boost immediately until the (often sleeping) thermostat confirms the change
   _displayedBoost() {
     const real = this._boostActive();
     const p = this._pendingBoost;
@@ -496,7 +547,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
       const confirmed = real === p.value;
       if (confirmed || Date.now() - p.at > BOOST_TIMEOUT_MS) {
         this._pendingBoost = null;
-        if (!confirmed) this._message = { text: "Das Thermostat hat den Boost nicht bestätigt. Bitte nochmal tippen.", error: true };
+        if (!confirmed) this._message = { text: tr("err.boost_unconfirmed"), error: true };
       } else {
         return { on: p.value, pending: true };
       }
@@ -514,7 +565,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     clearTimeout(this._boostTimer);
     this._boostTimer = setTimeout(() => this._render(), BOOST_TIMEOUT_MS + 100);
     try {
-      // Gekoppelt: Boost an allen Mitgliedern mit eigener Boost-Entity umschalten
+      // Coupled: toggle boost on all members that have their own boost entity
       await Promise.all(this._entities.members.map((m) => this._setMemberBoost(m.boost, on)));
     } catch (err) {
       this._pendingBoost = null;
@@ -554,7 +605,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
         { type: "smart_heating_planer/conditions/subscribe" },
       )
       .catch(() => {
-        // Ältere Integration ohne Bedingungen: Abschnitt einfach weglassen
+        // Older integration without conditions: simply omit the section
         this._condSub = null;
         this._rules = null;
         return null;
@@ -567,7 +618,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     sub?.then((unsub) => unsub && unsub()).catch(() => {});
   }
 
-  // ---------- Thermostat-Gruppen ("mit Gruppe") ----------
+  // ---------- Thermostat groups ("with group") ----------
 
   _subscribeCouplings() {
     if (this._coupSub || !this._hass?.connection || !this.isConnected) return;
@@ -580,7 +631,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
         { type: "smart_heating_planer/couplings/subscribe" },
       )
       .catch(() => {
-        // Ältere Integration ohne Gruppen: Abschnitt einfach weglassen
+        // Older integration without groups: simply omit the section
         this._coupSub = null;
         this._couplings = null;
         return null;
@@ -596,7 +647,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
   async _saveCoupling() {
     const d = this._couplingDraft;
     if (!d.members[0] || !d.members[1]) {
-      this._couplingMessage = { text: "Bitte beide Thermostate wählen.", error: true };
+      this._couplingMessage = { text: tr("err.select_both"), error: true };
       return this._render();
     }
     this._couplingBusy = true;
@@ -606,20 +657,20 @@ class SmartHeatingPlanerCard extends HTMLElement {
       await this._hass.callWS({ type: "smart_heating_planer/couplings/save", coupling: d });
       this._couplingDraft = null;
     } catch (err) {
-      this._couplingMessage = { text: `Fehler: ${err?.message || err}`, error: true };
+      this._couplingMessage = { text: errText(err), error: true };
     }
     this._couplingBusy = false;
     this._render();
   }
 
   async _deleteCoupling(id) {
-    if (!confirm("Diese Gruppe löschen? Die climate-Entity wird entfernt, beide Thermostate bleiben erhalten.")) return;
+    if (!confirm(tr("confirm.delete_group"))) return;
     this._couplingBusy = true;
     this._render();
     try {
       await this._hass.callWS({ type: "smart_heating_planer/couplings/delete", coupling_id: id });
     } catch (err) {
-      this._couplingMessage = { text: `Fehler: ${err?.message || err}`, error: true };
+      this._couplingMessage = { text: errText(err), error: true };
     }
     this._couplingBusy = false;
     this._render();
@@ -647,8 +698,8 @@ class SmartHeatingPlanerCard extends HTMLElement {
 
   _couplingTooltip() {
     const other = this._entities.members.find((m) => m.climate !== this._config.entity);
-    if (this._entities.isGroup) return `Gruppe aus ${this._entities.members.map((m) => this._entityName(m.climate)).join(" + ")}`;
-    return `Gekoppelt mit ${this._entityName(other?.climate)}`;
+    if (this._entities.isGroup) return tr("group.tooltip_group", { names: this._entities.members.map((m) => this._entityName(m.climate)).join(" + ") });
+    return tr("group.tooltip_coupled", { name: this._entityName(other?.climate) });
   }
 
   _myRules() {
@@ -665,7 +716,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     };
   }
 
-  // Art der Bedingung je nach Entity: an/aus, Zahl oder Text/Auswahl
+  // Condition type depending on the entity: on/off, number or text/select
   _condKind(entityId) {
     const st = entityId && this._hass.states[entityId];
     const domain = (entityId || "").split(".")[0];
@@ -688,12 +739,12 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _stateLabel(entityId, value) {
     const st = this._hass.states[entityId];
     if (this._condKind(entityId) === "onoff") {
-      const labels = ON_OFF_LABELS[st?.attributes?.device_class] || ["an", "aus"];
-      if (value === "on") return labels[0];
-      if (value === "off") return labels[1];
+      const labels = ON_OFF_LABELS[st?.attributes?.device_class];
+      if (value === "on") return tr(labels ? `dc.${labels[0]}` : "state.on");
+      if (value === "off") return tr(labels ? `dc.${labels[1]}` : "state.off");
     }
-    const named = { home: "zu Hause", not_home: "abwesend", above_horizon: "über dem Horizont", below_horizon: "unter dem Horizont", playing: "spielt", paused: "pausiert", idle: "inaktiv" };
-    return named[value] || value;
+    const named = ["home", "not_home", "above_horizon", "below_horizon", "playing", "paused", "idle"];
+    return named.includes(value) ? tr(`state.${value}`) : value;
   }
 
   _entityName(entityId) {
@@ -748,7 +799,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
       this._condKind(rule.entity) === "onoff" && rule.operator === "eq"
         ? this._stateLabel(rule.entity, rule.value)
         : `${OPERATOR_LABELS[rule.operator]} ${this._stateLabel(rule.entity, rule.value)}`;
-    const action = rule.mode === "off" ? "Aus" : `Manuell ${fmtTemp(rule.temperature)} °C${rule.boost ? " + Boost" : ""}`;
+    const action = rule.mode === "off" ? tr("ui.off") : `${tr("ui.manual_temp", { temp: fmtTemp(rule.temperature) })}${rule.boost ? tr("ui.with_boost") : ""}`;
     return { when: `${name} ${cond}`, then: action, revert: rule.revert };
   }
 
@@ -760,21 +811,21 @@ class SmartHeatingPlanerCard extends HTMLElement {
       await this._hass.callWS({ type: "smart_heating_planer/conditions/save", rule });
       this._ruleDraft = null;
     } catch (err) {
-      this._condMessage = { text: `Fehler: ${err?.message || err}`, error: true };
+      this._condMessage = { text: errText(err), error: true };
     }
     this._condBusy = false;
     this._render();
   }
 
   async _deleteRule(id) {
-    if (!confirm("Diese Bedingung löschen?")) return;
+    if (!confirm(tr("confirm.delete_condition"))) return;
     this._condBusy = true;
     this._render();
     try {
       await this._hass.callWS({ type: "smart_heating_planer/conditions/delete", rule_id: id });
       this._ruleDraft = null;
     } catch (err) {
-      this._condMessage = { text: `Fehler: ${err?.message || err}`, error: true };
+      this._condMessage = { text: errText(err), error: true };
     }
     this._condBusy = false;
     this._render();
@@ -806,11 +857,11 @@ class SmartHeatingPlanerCard extends HTMLElement {
         return d?.id && this._deleteRule(d.id);
       case "c-save":
         if (!d.entity) {
-          this._condMessage = { text: "Bitte zuerst eine Entity wählen.", error: true };
+          this._condMessage = { text: tr("err.select_entity"), error: true };
           break;
         }
         if (!String(d.value).trim()) {
-          this._condMessage = { text: "Bitte einen Wert für die Bedingung angeben.", error: true };
+          this._condMessage = { text: tr("err.enter_value"), error: true };
           break;
         }
         return this._saveRule(d);
@@ -845,14 +896,14 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _addSlot() {
     const slots = this._editableSlots(this._day);
     if (!slots || slots.length >= this._entities.profile.maxSlots) return;
-    // In die größte Lücke einfügen, auf 15 Minuten gerundet
+    // Insert into the largest gap, rounded to 15 minutes
     let best = null;
     slots.forEach((s, i) => {
       const end = i + 1 < slots.length ? slots[i + 1].t : 1440;
       if (!best || end - s.t > best.len) best = { start: s.t, len: end - s.t, temp: s.temp };
     });
     if (!best || best.len < 30) {
-      this._message = { text: "Kein Platz für einen weiteren Zeitpunkt.", error: true };
+      this._message = { text: tr("err.no_room"), error: true };
       return this._render();
     }
     let t = best.start + Math.round(best.len / 2 / 15) * 15;
@@ -882,9 +933,9 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const t = toMinutes(value);
     if (!slots || !slots[index] || index === 0) return;
     if (t == null || t === 0) {
-      this._message = { text: "Der erste Zeitpunkt des Tages ist immer 00:00.", error: true };
+      this._message = { text: tr("err.first_slot"), error: true };
     } else if (slots.some((s, i) => i !== index && s.t === t)) {
-      this._message = { text: `Um ${toHHMM(t)} gibt es schon einen Zeitpunkt.`, error: true };
+      this._message = { text: tr("err.slot_exists", { time: toHHMM(t) }), error: true };
     } else {
       slots[index].t = t;
       slots.sort((a, b) => a.t - b.t);
@@ -903,7 +954,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const n = this._copyTargets.size;
     this._copyOpen = false;
     this._copyTargets = new Set();
-    this._message = n ? { text: `Auf ${n} ${n === 1 ? "Tag" : "Tage"} kopiert – jetzt speichern.` } : null;
+    this._message = n ? { text: tn("copied", n) } : null;
     this._render();
   }
 
@@ -922,18 +973,18 @@ class SmartHeatingPlanerCard extends HTMLElement {
     try {
       for (const day of days) {
         const draft = this._drafts[day];
-        // Gekoppelt: derselbe Plan geht an jedes Mitglied, jeweils passend zu dessen Profil serialisiert
+        // Coupled: the same schedule goes to every member, serialized to match each one's profile
         for (const member of this._entities.members) {
           const entity = member.days[day];
           if (!entity) continue;
           await this._call("text", "set_value", { entity_id: entity, value: serializeSchedule(draft.slots, member.profile) });
-          // Kleine Pause, damit das Thermostat die Befehle nacheinander verarbeitet
+          // Short pause so the thermostat processes the commands one after another
           await new Promise((r) => setTimeout(r, 300));
         }
         draft.saved = true;
         draft.savedAt = Date.now();
       }
-      this._message = { text: `Gespeichert (${days.length} ${days.length === 1 ? "Tag" : "Tage"}).` };
+      this._message = { text: tn("saved", days.length) };
     } catch (err) {
       this._showError(err, false);
     }
@@ -942,7 +993,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
   }
 
   _showError(err, render = true) {
-    this._message = { text: `Fehler: ${err?.message || err}`, error: true };
+    this._message = { text: errText(err), error: true };
     if (render) this._render();
   }
 
@@ -1022,8 +1073,8 @@ class SmartHeatingPlanerCard extends HTMLElement {
   // ---------- Darstellung ----------
 
   _render() {
-    if (!this._hass || !this._config) return;
-    // Nicht neu zeichnen, während eine Uhrzeit eingegeben wird (sonst schließt sich der Picker)
+    if (!this._hass || !this._config || !i18nReady()) return;
+    // Don't re-render while a time is being entered (otherwise the picker closes)
     const active = this.shadowRoot.activeElement;
     if (active && (active.tagName === "INPUT" || active.tagName === "SELECT")) {
       this._deferredRender = true;
@@ -1040,8 +1091,8 @@ class SmartHeatingPlanerCard extends HTMLElement {
       ? `${STYLE}<ha-card class="${this._compact ? "compact" : ""}">${this._renderThermostat(st)}${
           this._compact ? this._renderMessage() : this._renderPlanner() + this._renderConditions() + this._renderCouplingsSection()
         }</ha-card>`
-      : `${STYLE}<ha-card><div class="warn">Entity ${esc(this._config.entity)} nicht gefunden.</div></ha-card>`;
-    // Unveränderte Karte nicht neu aufbauen (Thermostat meldet sich oft mehrmals pro Sekunde)
+      : `${STYLE}<ha-card><div class="warn">${esc(tr("ui.entity_missing", { entity: this._config.entity }))}</div></ha-card>`;
+    // Don't rebuild an unchanged card (the thermostat often reports several times per second)
     if (html === this._lastHtml) return;
     this._lastHtml = html;
     this.shadowRoot.innerHTML = html;
@@ -1052,31 +1103,31 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const name = this._config.name || a.friendly_name || this._config.entity;
     const action = a.hvac_action;
     const target = this._currentTarget();
-    const modes = (a.hvac_modes || []).filter((m) => HVAC_LABELS[m]);
+    const modes = (a.hvac_modes || []).filter((m) => HVAC_MODES.includes(m));
     const unavailable = st.state === "unavailable" || st.state === "unknown";
     const isOff = st.state === "off";
     const now = this._planNow();
 
     return `
       <div class="head">
-        <button class="title" data-action="more-info" title="Details">
+        <button class="title" data-action="more-info" title="${tr("ui.details")}">
           <ha-icon icon="mdi:radiator"></ha-icon>
           <span>${esc(name)}</span>
           ${this._entities.coupled ? `<ha-icon class="link-icon" icon="mdi:link-variant" title="${esc(this._couplingTooltip())}"></ha-icon>` : ""}
         </button>
-        <span class="badge ${esc(action || st.state)}">${esc(ACTION_LABELS[action] || (unavailable ? "Nicht erreichbar" : st.state))}</span>
+        <span class="badge ${esc(action || st.state)}">${esc(ACTION_KEYS.includes(action) ? tr(`action.${action}`) : unavailable ? tr("ui.unreachable") : st.state)}</span>
       </div>
       <div class="thermo">
-        <button class="round" data-action="target-down" ${isOff || unavailable ? "disabled" : ""} aria-label="Kälter">
+        <button class="round" data-action="target-down" ${isOff || unavailable ? "disabled" : ""} aria-label="${tr("ui.colder")}">
           <ha-icon icon="mdi:minus"></ha-icon>
         </button>
-        ${this._compact ? `<button class="target tap" data-action="open-planner" aria-label="Wochenplan öffnen">` : `<div class="target">`}
-          <div class="big">${isOff ? "Aus" : `${fmtTemp(target)}<small>°C</small>`}</div>
-          <div class="current">Ist ${fmtTemp(a.current_temperature)} °C${
+        ${this._compact ? `<button class="target tap" data-action="open-planner" aria-label="${tr("ui.open_schedule")}">` : `<div class="target">`}
+          <div class="big">${isOff ? tr("ui.off") : `${fmtTemp(target)}<small>°C</small>`}</div>
+          <div class="current">${tr("ui.current", { temp: fmtTemp(a.current_temperature) })}${
             this._compact ? ` <ha-icon class="hint-icon" icon="mdi:calendar-week"></ha-icon>` : ""
           }</div>
         ${this._compact ? `</button>` : `</div>`}
-        <button class="round" data-action="target-up" ${isOff || unavailable ? "disabled" : ""} aria-label="Wärmer">
+        <button class="round" data-action="target-up" ${isOff || unavailable ? "disabled" : ""} aria-label="${tr("ui.warmer")}">
           <ha-icon icon="mdi:plus"></ha-icon>
         </button>
       </div>
@@ -1084,7 +1135,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
         ${modes
           .map(
             (m) => `<button class="mode ${st.state === m ? "on" : ""}" data-action="hvac" data-value="${m}">
-              <ha-icon icon="${HVAC_ICONS[m]}"></ha-icon>${HVAC_LABELS[m]}</button>`,
+              <ha-icon icon="${HVAC_ICONS[m]}"></ha-icon>${tr(`hvac.${m}`)}</button>`,
           )
           .join("")}
       </div>
@@ -1092,17 +1143,17 @@ class SmartHeatingPlanerCard extends HTMLElement {
     `;
   }
 
-  // Zeile unter den Modus-Knöpfen: nächste Planänderung, rechts daneben die Boost-Rakete
+  // Row below the mode buttons: next schedule change, with the boost rocket to its right
   _renderFoot(st, now) {
     const b = this._entities.boost;
     const plan = st.state === "auto" && now ? now : "";
     const activeRule = this._myRules().find((r) => r.active);
     const indicator = activeRule
-      ? `<span class="cond-active" title="${esc(`Bedingung aktiv: ${this._ruleSummary(activeRule).when}`)}"><ha-icon icon="mdi:auto-mode"></ha-icon></span>`
+      ? `<span class="cond-active" title="${esc(tr("ui.condition_active", { when: this._ruleSummary(activeRule).when }))}"><ha-icon icon="mdi:auto-mode"></ha-icon></span>`
       : "<span></span>";
     if (!b && !activeRule) return plan ? `<div class="plan-now">${plan}</div>` : "";
     if (!b) return `<div class="foot">${indicator}<div class="plan-now">${plan}</div><span></span></div>`;
-    // Nur sperren, wenn die Boost-Entity selbst weg ist – das Thermostat kann noch "unbekannt" melden
+    // Only lock if the boost entity itself is gone – the thermostat may still report "unknown"
     const unavailable = this._hass.states[b.id]?.state === "unavailable";
     const shown = this._displayedBoost();
     const cd = shown.on && this._entities.boostCountdown && this._hass.states[this._entities.boostCountdown];
@@ -1112,7 +1163,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
         ${indicator}
         <div class="plan-now">${plan}</div>
         <button class="boost ${shown.on ? "on" : ""} ${shown.pending ? "pending" : ""}" data-action="boost"
-          aria-pressed="${shown.on}" title="${shown.on ? "Boost beenden" : "Boost starten"}" ${unavailable ? "disabled" : ""}>
+          aria-pressed="${shown.on}" title="${shown.on ? tr("ui.boost_stop") : tr("ui.boost_start")}" ${unavailable ? "disabled" : ""}>
           <ha-icon icon="mdi:rocket-launch"></ha-icon>${left ? `<span>${esc(left)}</span>` : ""}
         </button>
       </div>
@@ -1134,14 +1185,14 @@ class SmartHeatingPlanerCard extends HTMLElement {
     let i = slots.length - 1;
     while (i > 0 && slots[i].t > mins) i--;
     const next = slots[i + 1];
-    if (next) return `Laut Plan ${fmtTemp(slots[i].temp)} °C bis ${toHHMM(next.t)}, danach ${fmtTemp(next.temp)} °C`;
-    return `Laut Plan ${fmtTemp(slots[i].temp)} °C bis Mitternacht`;
+    if (next) return tr("ui.plan_until", { temp: fmtTemp(slots[i].temp), time: toHHMM(next.t), next: fmtTemp(next.temp) });
+    return tr("ui.plan_until_midnight", { temp: fmtTemp(slots[i].temp) });
   }
 
   _renderPlanner() {
     const e = this._entities;
     if (!Object.keys(e.days).length) {
-      return `<div class="warn">Für dieses Thermostat wurden keine Wochenplan-Entities (text.*_weekly_schedule_*) gefunden.</div>${this._renderMessage()}`;
+      return `<div class="warn">${esc(tr("ui.no_schedule_entities"))}</div>${this._renderMessage()}`;
     }
     const today = JS_DAY[new Date().getDay()];
     const slots = this._slots(this._day);
@@ -1149,7 +1200,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const dayLong = DAYS.find((d) => d.key === this._day).long;
 
     return `
-      <div class="section-title">Wochenplan</div>
+      <div class="section-title">${tr("ui.weekly_schedule")}</div>
       ${this._renderPrograms()}
       <div class="days">
         ${DAYS.map(
@@ -1163,20 +1214,20 @@ class SmartHeatingPlanerCard extends HTMLElement {
              <div class="slots">${slots.map((s, i) => this._renderSlot(s, i, slots)).join("")}</div>
              <div class="row-actions">
                <button class="ghost" data-action="add" ${slots.length >= e.profile.maxSlots ? "disabled" : ""}>
-                 <ha-icon icon="mdi:plus-circle-outline"></ha-icon>Zeitpunkt</button>
+                 <ha-icon icon="mdi:plus-circle-outline"></ha-icon>${tr("ui.add_slot")}</button>
                <button class="ghost ${this._copyOpen ? "on" : ""}" data-action="copy-toggle">
-                 <ha-icon icon="mdi:content-copy"></ha-icon>${esc(dayLong)} kopieren</button>
+                 <ha-icon icon="mdi:content-copy"></ha-icon>${esc(tr("ui.copy_day", { day: dayLong }))}</button>
              </div>
              ${this._copyOpen ? this._renderCopy() : ""}`
-          : `<div class="warn">Plan für ${esc(dayLong)} ist (noch) nicht bekannt. Das Thermostat meldet ihn beim nächsten Aufwachen.</div>`
+          : `<div class="warn">${esc(tr("ui.day_unknown", { day: dayLong }))}</div>`
       }
       ${this._renderMessage()}
       ${
         dirty.length || this._saving
           ? `<div class="savebar">
-               <button class="ghost" data-action="discard" ${this._saving ? "disabled" : ""}>Verwerfen</button>
+               <button class="ghost" data-action="discard" ${this._saving ? "disabled" : ""}>${tr("ui.discard")}</button>
                <button class="primary" data-action="save" ${this._saving ? "disabled" : ""}>
-                 ${this._saving ? "Speichert …" : `Speichern (${dirty.map((k) => DAYS.find((d) => d.key === k).short).join(", ")})`}
+                 ${this._saving ? tr("ui.saving") : tr("ui.save_days", { days: dirty.map((k) => DAYS.find((d) => d.key === k).short).join(", ") })}
                </button>
              </div>`
           : ""
@@ -1192,15 +1243,15 @@ class SmartHeatingPlanerCard extends HTMLElement {
       ? `<div class="msg ${this._condMessage.error ? "error" : ""}">${esc(this._condMessage.text)}</div>`
       : "";
     return `
-      <div class="section-title">Bedingungen</div>
+      <div class="section-title">${tr("ui.conditions")}</div>
       ${
         rules.length
           ? `<div class="rules">${rules.map((r) => this._renderRule(r)).join("")}</div>`
           : d
             ? ""
-            : `<div class="warn">Zum Beispiel: Wenn Präsenz erkannt, dann Manuell 22 °C mit Boost – und zurück zum Plan, sobald niemand mehr da ist.</div>`
+            : `<div class="warn">${esc(tr("ui.conditions_hint"))}</div>`
       }
-      ${d ? this._renderRuleEditor(d) : `<button class="ghost" data-action="c-add"><ha-icon icon="mdi:plus-circle-outline"></ha-icon>Bedingung</button>`}
+      ${d ? this._renderRuleEditor(d) : `<button class="ghost" data-action="c-add"><ha-icon icon="mdi:plus-circle-outline"></ha-icon>${tr("ui.add_condition")}</button>`}
       ${msg}
     `;
   }
@@ -1210,12 +1261,12 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const editing = this._ruleDraft?.id === r.id;
     return `
       <div class="rule ${r.enabled ? "" : "disabled"} ${r.active ? "active" : ""} ${editing ? "editing" : ""}">
-        <button class="rule-main" data-action="c-edit" data-value="${esc(r.id)}" aria-label="Bearbeiten">
-          <span class="rule-when"><ha-icon icon="${r.active ? "mdi:auto-mode" : "mdi:help-rhombus-outline"}"></ha-icon>Wenn ${esc(s.when)}</span>
-          <span class="rule-then">→ ${esc(s.then)}${s.revert ? " · danach zurück" : ""}${r.active ? " · <b>aktiv</b>" : ""}</span>
+        <button class="rule-main" data-action="c-edit" data-value="${esc(r.id)}" aria-label="${tr("ui.edit")}">
+          <span class="rule-when"><ha-icon icon="${r.active ? "mdi:auto-mode" : "mdi:help-rhombus-outline"}"></ha-icon>${esc(tr("ui.when_rule", { when: s.when }))}</span>
+          <span class="rule-then">→ ${esc(s.then)}${s.revert ? esc(tr("ui.then_revert")) : ""}${r.active ? ` · <b>${esc(tr("ui.active"))}</b>` : ""}</span>
         </button>
         <button class="toggle ${r.enabled ? "on" : ""}" data-action="c-toggle" data-value="${esc(r.id)}" ${this._condBusy ? "disabled" : ""}
-          role="switch" aria-checked="${r.enabled}" aria-label="${r.enabled ? "Deaktivieren" : "Aktivieren"}"><i></i></button>
+          role="switch" aria-checked="${r.enabled}" aria-label="${r.enabled ? tr("ui.deactivate") : tr("ui.activate")}"><i></i></button>
       </div>
     `;
   }
@@ -1225,15 +1276,15 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const groups = {};
     for (const [id, st] of Object.entries(states)) {
       const domain = id.split(".")[0];
-      if (!COND_DOMAINS[domain] || id === this._config.entity) continue;
+      if (!COND_DOMAINS.includes(domain) || id === this._config.entity) continue;
       (groups[domain] = groups[domain] || []).push({ id, name: st.attributes.friendly_name || id });
     }
-    const entityOptions = Object.keys(COND_DOMAINS)
+    const entityOptions = COND_DOMAINS
       .filter((dom) => groups[dom])
       .map(
         (dom) =>
-          `<optgroup label="${esc(COND_DOMAINS[dom])}">${groups[dom]
-            .sort((a, b) => a.name.localeCompare(b.name, "de"))
+          `<optgroup label="${esc(tr(`domain.${dom}`))}">${groups[dom]
+            .sort((a, b) => a.name.localeCompare(b.name, LANG))
             .map((e) => `<option value="${esc(e.id)}" ${e.id === d.entity ? "selected" : ""}>${esc(e.name)}</option>`)
             .join("")}</optgroup>`,
       )
@@ -1258,52 +1309,52 @@ class SmartHeatingPlanerCard extends HTMLElement {
             .filter((o) => o !== "")
             .map((o) => `<option value="${esc(o)}" ${o === d.value ? "selected" : ""}>${esc(this._stateLabel(d.entity, o))}</option>`)
             .join("")}</select>`
-        : `<input class="field" data-action="c-input" ${kind === "number" ? 'type="text" inputmode="decimal"' : 'type="text"'} value="${esc(d.value)}" aria-label="Wert">${
+        : `<input class="field" data-action="c-input" ${kind === "number" ? 'type="text" inputmode="decimal"' : 'type="text"'} value="${esc(d.value)}" aria-label="${tr("ui.value")}">${
             kind === "number" && cur?.attributes?.unit_of_measurement ? `<span class="unit">${esc(cur.attributes.unit_of_measurement)}</span>` : ""
           }`;
       condHtml = `<div class="chips">${opChips}</div><div class="value-row">${input}</div>`;
     }
-    const now = cur ? `<div class="hint">Aktuell: ${esc(this._stateLabel(d.entity, cur.state))}${cur.attributes.unit_of_measurement ? " " + esc(cur.attributes.unit_of_measurement) : ""}</div>` : "";
+    const now = cur ? `<div class="hint">${esc(tr("ui.now", { value: this._stateLabel(d.entity, cur.state) + (cur.attributes.unit_of_measurement ? " " + cur.attributes.unit_of_measurement : "") }))}</div>` : "";
     const r = this._ruleTempRange();
     const offOk = this._hasOffMode();
     const boostOk = !!this._entities.boost;
     return `
       <div class="editor">
-        <div class="ed-label">Wenn</div>
+        <div class="ed-label">${tr("ui.when")}</div>
         <select class="field" data-action="c-entity" aria-label="Entity">
-          ${d.entity ? "" : `<option value="" selected disabled>Entity wählen …</option>`}
+          ${d.entity ? "" : `<option value="" selected disabled>${tr("ui.choose_entity")}</option>`}
           ${entityOptions}
         </select>
         ${condHtml}
         ${now}
-        <div class="ed-label">Dann</div>
+        <div class="ed-label">${tr("ui.then")}</div>
         <div class="chips">
-          <button class="chip ${d.mode === "manual" ? "on" : ""}" data-action="c-mode" data-value="manual"><ha-icon icon="mdi:hand-back-right"></ha-icon>Manuell</button>
-          ${offOk || d.mode === "off" ? `<button class="chip ${d.mode === "off" ? "on" : ""}" data-action="c-mode" data-value="off"><ha-icon icon="mdi:power"></ha-icon>Aus</button>` : ""}
+          <button class="chip ${d.mode === "manual" ? "on" : ""}" data-action="c-mode" data-value="manual"><ha-icon icon="mdi:hand-back-right"></ha-icon>${tr("ui.manual")}</button>
+          ${offOk || d.mode === "off" ? `<button class="chip ${d.mode === "off" ? "on" : ""}" data-action="c-mode" data-value="off"><ha-icon icon="mdi:power"></ha-icon>${tr("ui.off")}</button>` : ""}
         </div>
         ${
           d.mode === "manual"
             ? `<div class="ed-temp">
-                 <button class="small" data-action="c-temp" data-value="-1" ${d.temperature <= r.min ? "disabled" : ""} aria-label="Kälter"><ha-icon icon="mdi:minus"></ha-icon></button>
+                 <button class="small" data-action="c-temp" data-value="-1" ${d.temperature <= r.min ? "disabled" : ""} aria-label="${tr("ui.colder")}"><ha-icon icon="mdi:minus"></ha-icon></button>
                  <span class="temp big-temp">${fmtTemp(d.temperature)} °C</span>
-                 <button class="small" data-action="c-temp" data-value="1" ${d.temperature >= r.max ? "disabled" : ""} aria-label="Wärmer"><ha-icon icon="mdi:plus"></ha-icon></button>
+                 <button class="small" data-action="c-temp" data-value="1" ${d.temperature >= r.max ? "disabled" : ""} aria-label="${tr("ui.warmer")}"><ha-icon icon="mdi:plus"></ha-icon></button>
                </div>
                ${
                  boostOk
                    ? `<button class="opt" data-action="c-boost" role="switch" aria-checked="${d.boost}">
-                        <ha-icon icon="mdi:rocket-launch" class="${d.boost ? "boost-on" : ""}"></ha-icon><span>Boost starten</span>
+                        <ha-icon icon="mdi:rocket-launch" class="${d.boost ? "boost-on" : ""}"></ha-icon><span>${tr("ui.boost_start")}</span>
                         <span class="toggle ${d.boost ? "on" : ""}"><i></i></span></button>`
                    : ""
                }`
             : ""
         }
         <button class="opt" data-action="c-revert" role="switch" aria-checked="${d.revert}">
-          <ha-icon icon="mdi:backup-restore"></ha-icon><span>Zurücksetzen, wenn die Bedingung nicht mehr erfüllt ist</span>
+          <ha-icon icon="mdi:backup-restore"></ha-icon><span>${tr("ui.revert")}</span>
           <span class="toggle ${d.revert ? "on" : ""}"><i></i></span></button>
         <div class="savebar static">
-          ${d.id ? `<button class="ghost del-btn" data-action="c-delete" ${this._condBusy ? "disabled" : ""} aria-label="Löschen"><ha-icon icon="mdi:delete-outline"></ha-icon></button>` : ""}
-          <button class="ghost" data-action="c-cancel" ${this._condBusy ? "disabled" : ""}>Abbrechen</button>
-          <button class="primary" data-action="c-save" ${this._condBusy ? "disabled" : ""}>${this._condBusy ? "Speichert …" : "Speichern"}</button>
+          ${d.id ? `<button class="ghost del-btn" data-action="c-delete" ${this._condBusy ? "disabled" : ""} aria-label="${tr("ui.delete")}"><ha-icon icon="mdi:delete-outline"></ha-icon></button>` : ""}
+          <button class="ghost" data-action="c-cancel" ${this._condBusy ? "disabled" : ""}>${tr("ui.cancel")}</button>
+          <button class="primary" data-action="c-save" ${this._condBusy ? "disabled" : ""}>${this._condBusy ? tr("ui.saving") : tr("ui.save")}</button>
         </div>
       </div>
     `;
@@ -1316,18 +1367,18 @@ class SmartHeatingPlanerCard extends HTMLElement {
       ? `<div class="msg ${this._couplingMessage.error ? "error" : ""}">${esc(this._couplingMessage.text)}</div>`
       : "";
     return `
-      <div class="section-title">Thermostat-Gruppen</div>
+      <div class="section-title">${tr("ui.groups")}</div>
       ${
         this._couplings.length
           ? `<div class="rules">${this._couplings.map((c) => this._renderCoupling(c)).join("")}</div>`
           : d
             ? ""
-            : `<div class="warn">Zwei Thermostate "mit Gruppe" zu einer gemeinsamen climate-Entity zusammenfassen – nutzbar auch in anderen Karten, bei Google Home/Alexa usw. Für eine Kopplung "ohne Gruppe" reicht ein zweites Thermostat (entity2) im Karten-Editor dieser Karte.</div>`
+            : `<div class="warn">${esc(tr("ui.groups_hint"))}</div>`
       }
       ${
         d
           ? this._renderCouplingEditor(d)
-          : `<button class="ghost" data-action="g-add"><ha-icon icon="mdi:link-variant-plus"></ha-icon>Gruppe</button>`
+          : `<button class="ghost" data-action="g-add"><ha-icon icon="mdi:link-variant-plus"></ha-icon>${tr("ui.group")}</button>`
       }
       ${msg}
     `;
@@ -1340,10 +1391,10 @@ class SmartHeatingPlanerCard extends HTMLElement {
         <div class="rule-main">
           <span class="rule-when"><ha-icon icon="mdi:link-variant"></ha-icon>${esc(c.name)}</span>
           <span class="rule-then">${esc(this._entityName(a))} ↔ ${esc(this._entityName(b))}${
-            c.entity_id ? ` · ${esc(c.entity_id)}` : " · wird angelegt …"
+            c.entity_id ? ` · ${esc(c.entity_id)}` : ` · ${esc(tr("ui.being_created"))}`
           }</span>
         </div>
-        <button class="ghost del-btn" data-action="g-delete" data-value="${esc(c.id)}" ${this._couplingBusy ? "disabled" : ""} aria-label="Löschen">
+        <button class="ghost del-btn" data-action="g-delete" data-value="${esc(c.id)}" ${this._couplingBusy ? "disabled" : ""} aria-label="${tr("ui.delete")}">
           <ha-icon icon="mdi:delete-outline"></ha-icon></button>
       </div>
     `;
@@ -1352,7 +1403,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
   _renderCouplingEditor(d) {
     const options = Object.keys(this._hass.states)
       .filter((id) => id.startsWith("climate.") && !this._hass.states[id].attributes.smart_heating_planer_group)
-      .sort((a, b) => this._entityName(a).localeCompare(this._entityName(b), "de"));
+      .sort((a, b) => this._entityName(a).localeCompare(this._entityName(b), LANG));
     const opt = (selected, otherValue) =>
       options
         .filter((id) => id !== otherValue)
@@ -1360,21 +1411,21 @@ class SmartHeatingPlanerCard extends HTMLElement {
         .join("");
     return `
       <div class="editor">
-        <div class="ed-label">Name</div>
-        <input class="field" type="text" data-action="g-name" value="${esc(d.name)}" placeholder="z. B. Heizung + Bad" aria-label="Name">
-        <div class="ed-label">Thermostat 1</div>
-        <select class="field" data-action="g-member1" aria-label="Thermostat 1">
-          ${d.members[0] ? "" : `<option value="" selected disabled>wählen …</option>`}
+        <div class="ed-label">${tr("ui.name")}</div>
+        <input class="field" type="text" data-action="g-name" value="${esc(d.name)}" placeholder="${esc(tr("ui.name_placeholder"))}" aria-label="${tr("ui.name")}">
+        <div class="ed-label">${tr("ui.thermostat_n", { n: 1 })}</div>
+        <select class="field" data-action="g-member1" aria-label="${tr("ui.thermostat_n", { n: 1 })}">
+          ${d.members[0] ? "" : `<option value="" selected disabled>${tr("ui.choose")}</option>`}
           ${opt(d.members[0], d.members[1])}
         </select>
-        <div class="ed-label">Thermostat 2</div>
-        <select class="field" data-action="g-member2" aria-label="Thermostat 2">
-          ${d.members[1] ? "" : `<option value="" selected disabled>wählen …</option>`}
+        <div class="ed-label">${tr("ui.thermostat_n", { n: 2 })}</div>
+        <select class="field" data-action="g-member2" aria-label="${tr("ui.thermostat_n", { n: 2 })}">
+          ${d.members[1] ? "" : `<option value="" selected disabled>${tr("ui.choose")}</option>`}
           ${opt(d.members[1], d.members[0])}
         </select>
         <div class="savebar static">
-          <button class="ghost" data-action="g-cancel" ${this._couplingBusy ? "disabled" : ""}>Abbrechen</button>
-          <button class="primary" data-action="g-save" ${this._couplingBusy ? "disabled" : ""}>${this._couplingBusy ? "Speichert …" : "Anlegen"}</button>
+          <button class="ghost" data-action="g-cancel" ${this._couplingBusy ? "disabled" : ""}>${tr("ui.cancel")}</button>
+          <button class="primary" data-action="g-save" ${this._couplingBusy ? "disabled" : ""}>${this._couplingBusy ? tr("ui.saving") : tr("ui.create")}</button>
         </div>
       </div>
     `;
@@ -1390,19 +1441,19 @@ class SmartHeatingPlanerCard extends HTMLElement {
     const mismatch = !shown.pending && edit && edit !== active.state;
     return `
       <div class="programs">
-        <span class="label">Programm</span>
+        <span class="label">${tr("ui.program")}</span>
         ${options
           .map(
             (o) =>
               `<button class="chip ${shown.group === o ? "on" : ""} ${shown.pending && shown.group === o ? "pending" : ""}" data-action="program" data-value="${esc(o)}">${esc(o)}</button>`,
           )
           .join("")}
-        ${shown.pending ? `<span class="hint">wird übertragen …</span>` : ""}
+        ${shown.pending ? `<span class="hint">${tr("ui.transferring")}</span>` : ""}
       </div>
       ${
         mismatch
-          ? `<div class="msg error">Angezeigt wird Programm ${esc(edit)}, aktiv ist aber Programm ${esc(active.state)}.
-             <button class="link" data-action="edit-active">Aktives Programm anzeigen</button></div>`
+          ? `<div class="msg error">${esc(tr("ui.program_mismatch", { edit, active: active.state }))}
+             <button class="link" data-action="edit-active">${tr("ui.show_active_program")}</button></div>`
           : ""
       }
     `;
@@ -1437,16 +1488,16 @@ class SmartHeatingPlanerCard extends HTMLElement {
           ${
             i === 0
               ? `<span class="fixed">00:00</span>`
-              : `<input type="time" step="900" value="${toHHMM(s.t)}" data-action="time" data-index="${i}" aria-label="Uhrzeit">`
+              : `<input type="time" step="900" value="${toHHMM(s.t)}" data-action="time" data-index="${i}" aria-label="${tr("ui.time")}">`
           }
-          <span class="until">bis ${end}</span>
+          <span class="until">${esc(tr("ui.until", { time: end }))}</span>
         </div>
-        <button class="small" data-action="temp-down" data-index="${i}" ${s.temp <= this._entities.profile.min ? "disabled" : ""} aria-label="Kälter">
+        <button class="small" data-action="temp-down" data-index="${i}" ${s.temp <= this._entities.profile.min ? "disabled" : ""} aria-label="${tr("ui.colder")}">
           <ha-icon icon="mdi:minus"></ha-icon></button>
         <span class="temp">${fmtTemp(s.temp)}°</span>
-        <button class="small" data-action="temp-up" data-index="${i}" ${s.temp >= this._entities.profile.max ? "disabled" : ""} aria-label="Wärmer">
+        <button class="small" data-action="temp-up" data-index="${i}" ${s.temp >= this._entities.profile.max ? "disabled" : ""} aria-label="${tr("ui.warmer")}">
           <ha-icon icon="mdi:plus"></ha-icon></button>
-        <button class="small del" data-action="remove" data-index="${i}" ${i === 0 ? "disabled" : ""} aria-label="Löschen">
+        <button class="small del" data-action="remove" data-index="${i}" ${i === 0 ? "disabled" : ""} aria-label="${tr("ui.delete")}">
           <ha-icon icon="mdi:delete-outline"></ha-icon></button>
       </div>
     `;
@@ -1456,9 +1507,9 @@ class SmartHeatingPlanerCard extends HTMLElement {
     return `
       <div class="copy">
         <div class="copy-presets">
-          <button class="chip" data-action="copy-preset" data-value="work">Mo–Fr</button>
-          <button class="chip" data-action="copy-preset" data-value="weekend">Sa–So</button>
-          <button class="chip" data-action="copy-preset" data-value="all">Alle</button>
+          <button class="chip" data-action="copy-preset" data-value="work">${tr("ui.weekdays")}</button>
+          <button class="chip" data-action="copy-preset" data-value="weekend">${tr("ui.weekend")}</button>
+          <button class="chip" data-action="copy-preset" data-value="all">${tr("ui.all")}</button>
         </div>
         <div class="days">
           ${DAYS.map((d) =>
@@ -1467,7 +1518,7 @@ class SmartHeatingPlanerCard extends HTMLElement {
               : `<button class="day ${this._copyTargets.has(d.key) ? "on" : ""}" data-action="copy-day" data-value="${d.key}">${d.short}</button>`,
           ).join("")}
         </div>
-        <button class="primary wide" data-action="copy-apply" ${this._copyTargets.size ? "" : "disabled"}>Übernehmen</button>
+        <button class="primary wide" data-action="copy-apply" ${this._copyTargets.size ? "" : "disabled"}>${tr("ui.apply")}</button>
       </div>
     `;
   }
@@ -1596,6 +1647,9 @@ class SmartHeatingPlanerCardEditor extends HTMLElement {
 
   set hass(hass) {
     this._hass = hass;
+    setLang(hass?.language, (this._onLang ||= () => {
+      if (this._form) this._form.schema = [...this._form.schema];
+    }));
     if (this._form) this._form.hass = hass;
   }
 
@@ -1609,14 +1663,7 @@ class SmartHeatingPlanerCardEditor extends HTMLElement {
         { name: "max_slots", selector: { number: { min: 1, max: 12, mode: "box" } } },
         { name: "boost_entity", selector: { entity: { domain: ["switch", "select", "input_boolean"] } } },
       ];
-      this._form.computeLabel = (s) =>
-        ({
-          entity: "Thermostat",
-          entity2: "Zweites Thermostat (optional, ohne Gruppe gekoppelt)",
-          name: "Name (optional)",
-          max_slots: "Max. Schaltpunkte pro Tag (optional, sonst automatisch)",
-          boost_entity: "Boost-Entity (optional, sonst automatisch)",
-        })[s.name];
+      this._form.computeLabel = (s) => tr(`editor.${s.name}`);
       this._form.addEventListener("value-changed", (ev) => {
         const config = { ...this._config, ...ev.detail.value };
         if (!config.name) delete config.name;
@@ -1633,7 +1680,7 @@ class SmartHeatingPlanerCardEditor extends HTMLElement {
   }
 }
 
-/** Nur der Thermostat-Teil. Tipp auf die Temperatur öffnet den Wochenplan als Dialog. */
+/** Thermostat part only. Tapping the temperature opens the weekly schedule as a dialog. */
 class SmartHeatingPlanerCompactCard extends SmartHeatingPlanerCard {
   constructor() {
     super();
@@ -1665,17 +1712,18 @@ class SmartHeatingPlanerCompactCard extends SmartHeatingPlanerCard {
     dialog.setup(this._config, this._hass, this);
     dialog.addEventListener("shp-closed", () => (this._dialog = null));
     this._dialog = dialog;
-    // Am body, damit der Dialog nicht von Dashboard-Spalten abgeschnitten wird
+    // Attached to body so the dialog isn't clipped by dashboard columns
     document.body.appendChild(dialog);
   }
 }
 
-/** Vollbild-Dialog mit der vollständigen Karte. Schließen per ✕, Tipp daneben, Esc oder Zurück-Taste. */
+/** Fullscreen dialog with the complete card. Close via ✕, tapping outside, Esc or the back button. */
 class SmartHeatingPlanerDialog extends HTMLElement {
   setup(config, hass, origin) {
     this._config = config;
     this._hass = hass;
     this._origin = origin;
+    setLang(hass.language);
   }
 
   set hass(hass) {
@@ -1688,9 +1736,9 @@ class SmartHeatingPlanerDialog extends HTMLElement {
     const root = this.attachShadow({ mode: "open" });
     root.innerHTML = `${DIALOG_STYLE}
       <div class="backdrop"></div>
-      <div class="panel" role="dialog" aria-modal="true" aria-label="Wochenplan">
-        <div class="bar"><span>Wochenplan</span>
-          <button class="close" aria-label="Schließen"><ha-icon icon="mdi:close"></ha-icon></button></div>
+      <div class="panel" role="dialog" aria-modal="true" aria-label="${tr("ui.weekly_schedule")}">
+        <div class="bar"><span>${tr("ui.weekly_schedule")}</span>
+          <button class="close" aria-label="${tr("ui.close")}"><ha-icon icon="mdi:close"></ha-icon></button></div>
       </div>`;
     this._card = document.createElement("smart-heating-planer-card");
     this._card.setConfig(this._config);
@@ -1698,7 +1746,7 @@ class SmartHeatingPlanerDialog extends HTMLElement {
     root.querySelector(".panel").appendChild(this._card);
     root.querySelector(".backdrop").addEventListener("click", () => this.close());
     root.querySelector(".close").addEventListener("click", () => this.close());
-    // Details-Dialog von HA kann aus dem body heraus nicht geöffnet werden – über die Ursprungskarte weiterreichen
+    // HA's details dialog can't be opened from the body – pass it on via the originating card
     this.addEventListener("hass-more-info", (ev) => {
       ev.stopPropagation();
       const origin = this._origin;
@@ -1706,7 +1754,7 @@ class SmartHeatingPlanerDialog extends HTMLElement {
       const viaBack = history.state?.shpPlaner;
       if (!this.close()) return;
       if (!viaBack) return fire();
-      // Erst nach dem Zurück-Schritt öffnen, sonst schließt HA seinen Dialog gleich wieder
+      // Open only after the back step, otherwise HA closes its dialog again right away
       const once = () => {
         clearTimeout(timer);
         fire();
@@ -1719,7 +1767,7 @@ class SmartHeatingPlanerDialog extends HTMLElement {
     });
     this._onKey = (ev) => ev.key === "Escape" && this.close();
     document.addEventListener("keydown", this._onKey);
-    // Zurück-Taste (Android) schließt den Dialog statt das Dashboard zu verlassen
+    // Back button (Android) closes the dialog instead of leaving the dashboard
     history.pushState({ ...(history.state || {}), shpPlaner: true }, "");
     this._onPop = () => this.close(false, true);
     window.addEventListener("popstate", this._onPop);
@@ -1727,7 +1775,7 @@ class SmartHeatingPlanerDialog extends HTMLElement {
 
   close(force = false, fromPop = false) {
     if (this._closed) return true;
-    if (!force && this._card?._dirtyDays().length && !confirm("Ungespeicherte Änderungen am Wochenplan verwerfen?")) {
+    if (!force && this._card?._dirtyDays().length && !confirm(tr("confirm.close_dialog"))) {
       if (fromPop) history.pushState({ ...(history.state || {}), shpPlaner: true }, "");
       return false;
     }
@@ -1761,20 +1809,23 @@ if (!customElements.get("smart-heating-planer-card")) {
   customElements.define("smart-heating-planer-compact-card", SmartHeatingPlanerCompactCard);
   customElements.define("smart-heating-planer-dialog", SmartHeatingPlanerDialog);
   customElements.define("smart-heating-planer-card-editor", SmartHeatingPlanerCardEditor);
+  // The card picker has no hass yet: use the browser language, create entries only after loading
   window.customCards = window.customCards || [];
-  window.customCards.push({
-    type: "smart-heating-planer-card",
-    name: "Smart Heating Planer",
-    description: "Thermostat mit Wochenplan zum Antippen (Zigbee2MQTT)",
-    preview: true,
-    documentationURL: "https://github.com/thestealth131205/HA-SmartHeatingPlaner",
-  });
-  window.customCards.push({
-    type: "smart-heating-planer-compact-card",
-    name: "Smart Heating Planer (kompakt)",
-    description: "Nur Thermostat, Tipp auf die Temperatur öffnet den Wochenplan",
-    preview: true,
-    documentationURL: "https://github.com/thestealth131205/HA-SmartHeatingPlaner",
+  setLang(document.documentElement.lang || navigator.language, () => {
+    window.customCards.push({
+      type: "smart-heating-planer-card",
+      name: "Smart Heating Planer",
+      description: tr("card.description"),
+      preview: true,
+      documentationURL: "https://github.com/thestealth131205/HA-SmartHeatingPlaner",
+    });
+    window.customCards.push({
+      type: "smart-heating-planer-compact-card",
+      name: tr("card.compact_name"),
+      description: tr("card.compact_description"),
+      preview: true,
+      documentationURL: "https://github.com/thestealth131205/HA-SmartHeatingPlaner",
+    });
   });
   console.info(`%c SMART-HEATING-PLANER %c ${VERSION} `, "background:#ff8100;color:#fff", "background:#333;color:#fff");
 }

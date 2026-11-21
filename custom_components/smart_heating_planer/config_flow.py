@@ -1,4 +1,4 @@
-"""Config-Flow für Smart Heating Planer – nur ein Bestätigungsschritt."""
+"""Config flow for Smart Heating Planer – just a confirmation step."""
 
 from __future__ import annotations
 

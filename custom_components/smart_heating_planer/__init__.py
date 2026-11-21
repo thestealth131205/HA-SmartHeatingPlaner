@@ -1,17 +1,17 @@
-"""Smart Heating Planer – Thermostat-Karte mit Wochenplan zum Antippen.
+"""Smart Heating Planer – thermostat card with a tap-to-edit weekly schedule.
 
-Die Integration liefert die Lovelace-Karte ``custom:smart-heating-planer-card``
-aus und lädt sie automatisch im Frontend. Eine Ressource muss nicht von Hand
-eingetragen werden. Der Plan selbst liegt im Thermostat (Zigbee2MQTT-Entities
-``text.<name>_weekly_schedule_<tag>``), die Karte liest und schreibt ihn direkt.
+The integration serves the Lovelace card ``custom:smart-heating-planer-card``
+and loads it automatically in the frontend. No resource needs to be added by
+hand. The schedule itself lives in the thermostat (Zigbee2MQTT entities
+``text.<name>_weekly_schedule_<day>``); the card reads and writes it directly.
 
-Zusätzlich verwaltet die Integration Bedingungen (siehe ``conditions.py``):
-Entity-Zustand → Thermostat auf Manuell/Aus, optional Boost, optional zurücksetzen.
+The integration also manages conditions (see ``conditions.py``):
+entity state → thermostat to manual/off, optional boost, optional reset.
 
-Und Kopplungen (siehe ``couplings.py``): zwei Thermostate "mit Gruppe" zu einer
-eigenen climate-Entity zusammenfassen, die überall in Home Assistant nutzbar ist.
-Die Kopplung "ohne Gruppe" (zweites Thermostat nur in der Karte mitgeführt)
-braucht dagegen keine Integrations-Logik, das steckt komplett in der Karte.
+And couplings (see ``couplings.py``): combine two thermostats "with group" into
+a dedicated climate entity that can be used anywhere in Home Assistant.
+The coupling "without group" (second thermostat only carried along in the card)
+needs no integration logic; it lives entirely in the card.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from homeassistant.helpers import config_validation as cv
 
 from . import websocket
 from .conditions import ConditionManager
-from .const import CARD_URL, CARD_URL_BASE, DOMAIN, VERSION
+from .const import CARD_URL, CARD_URL_BASE, DOMAIN, TRANSLATIONS_URL_BASE, VERSION
 from .couplings import CouplingManager
 from .websocket import DATA_COUPLINGS, DATA_MANAGER
 
@@ -35,20 +35,24 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 PLATFORMS = ["climate"]
 
 _FRONTEND_DIR = Path(__file__).parent / "frontend"
+_TRANSLATIONS_DIR = Path(__file__).parent / "translations"
 _STATIC_REGISTERED = f"{DOMAIN}_static_registered"
 _WS_REGISTERED = f"{DOMAIN}_ws_registered"
 
 
 def _versioned_url() -> str:
-    # Versions-Parameter, damit Browser nach einem Update die neue Karte laden
+    # Version parameter so browsers load the new card after an update
     return f"{CARD_URL}?v={VERSION}"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    # Statische Pfade lassen sich nicht wieder abmelden, daher nur einmal pro Lauf
+    # Static paths cannot be unregistered, so register them only once per run
     if not hass.data.get(_STATIC_REGISTERED):
         await hass.http.async_register_static_paths(
-            [StaticPathConfig(CARD_URL_BASE, str(_FRONTEND_DIR), cache_headers=False)]
+            [
+                StaticPathConfig(CARD_URL_BASE, str(_FRONTEND_DIR), cache_headers=False),
+                StaticPathConfig(TRANSLATIONS_URL_BASE, str(_TRANSLATIONS_DIR), cache_headers=False),
+            ]
         )
         hass.data[_STATIC_REGISTERED] = True
     if not hass.data.get(_WS_REGISTERED):
@@ -57,8 +61,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     manager = ConditionManager(hass)
     await manager.async_load()
     hass.data[DATA_MANAGER] = manager
-    # CouplingManager wird erst nutzbar, sobald die climate-Plattform ihre
-    # async_add_entities-Funktion über manager.bind() hinterlegt hat.
+    # CouplingManager becomes usable only once the climate platform has registered its
+    # async_add_entities function via manager.bind().
     hass.data[DATA_COUPLINGS] = CouplingManager(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     add_extra_js_url(hass, _versioned_url())

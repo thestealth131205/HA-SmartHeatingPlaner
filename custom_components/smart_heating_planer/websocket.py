@@ -1,4 +1,4 @@
-"""Websocket-API für die Karte: Bedingungen und Gruppen-Kopplungen abonnieren, speichern, löschen."""
+"""Websocket API for the card: subscribe to, save and delete conditions and group couplings."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def async_register(hass: HomeAssistant) -> None:
 def _manager(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg_id: int):
     manager = hass.data.get(DATA_MANAGER)
     if manager is None:
-        connection.send_error(msg_id, "not_loaded", "Smart Heating Planer ist nicht eingerichtet")
+        connection.send_error(msg_id, "not_loaded", "srv_not_loaded")
     return manager
 
 
@@ -81,7 +81,7 @@ async def ws_delete(hass: HomeAssistant, connection: websocket_api.ActiveConnect
 def _couplings(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg_id: int):
     manager = hass.data.get(DATA_COUPLINGS)
     if manager is None:
-        connection.send_error(msg_id, "not_loaded", "Smart Heating Planer ist nicht eingerichtet")
+        connection.send_error(msg_id, "not_loaded", "srv_not_loaded")
     return manager
 
 

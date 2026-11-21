@@ -1,4 +1,4 @@
-"""Climate-Plattform: legt die Gruppen-Entities aus couplings.py an."""
+"""Climate platform: creates the group entities from couplings.py."""
 
 from __future__ import annotations
 

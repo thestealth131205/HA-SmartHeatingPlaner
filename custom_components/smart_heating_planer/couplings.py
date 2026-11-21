@@ -1,17 +1,16 @@
-"""Kopplungen: zwei Thermostate zu einer Gruppen-Climate-Entity zusammenfassen.
+"""Couplings: combine two thermostats into one group climate entity.
 
-"Mit Gruppe" aus Sicht der Karte: Eine Kopplung besteht aus genau zwei
-climate-Entities. Die Integration legt dafür eine eigene climate-Entity an
-(``climate.<name>``), die Befehle über die normalen HA-Services mit beiden
-Entity-IDs gleichzeitig weiterreicht – climate kennt im Kern von Home
-Assistant keine Gruppen wie Licht/Schalter, das holen wir hier nach. Der
-Zustand wird aus beiden Mitgliedern zusammengefasst (gleich: übernehmen,
-unterschiedlich: Wert des ersten Mitglieds). Die neue Entity ist dadurch
-überall in Home Assistant nutzbar, nicht nur in dieser Karte.
+"With group" from the card's point of view: a coupling consists of exactly two
+climate entities. The integration creates a dedicated climate entity for it
+(``climate.<name>``) that forwards commands through the normal HA services to both
+entity IDs at once – Home Assistant core has no climate groups like it has for
+lights/switches, so we add that here. The state is combined from both members
+(equal: adopt it, different: value of the first member). The new entity can
+therefore be used anywhere in Home Assistant, not just in this card.
 
-Verwaltet wird das komplett über die Karte (siehe
-``smart_heating_planer/couplings/*`` in websocket.py), kein Options-Flow
-nötig – Entities werden zur Laufzeit hinzugefügt/entfernt.
+It is managed entirely through the card (see
+``smart_heating_planer/couplings/*`` in websocket.py), no options flow
+needed – entities are added/removed at runtime.
 """
 
 from __future__ import annotations
@@ -41,7 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 STORAGE_VERSION = 1
 STORAGE_KEY = f"{DOMAIN}.couplings"
 _INVALID = (STATE_UNAVAILABLE, STATE_UNKNOWN)
-# Reihenfolge, in der bei unterschiedlichem Modus der gemeinsame Modus gewählt wird
+# Order in which the common mode is chosen when the modes differ
 _MODE_PRIORITY = (HVACMode.HEAT, HVACMode.AUTO, HVACMode.COOL)
 _ACTION_PRIORITY = (HVACAction.HEATING, HVACAction.PREHEATING, HVACAction.COOLING, HVACAction.IDLE)
 
@@ -49,20 +48,20 @@ _ACTION_PRIORITY = (HVACAction.HEATING, HVACAction.PREHEATING, HVACAction.COOLIN
 def validate_coupling(data: dict[str, Any], existing: list[dict[str, Any]]) -> dict[str, Any]:
     members = [str(m) for m in (data.get("members") or [])]
     if len(members) != 2 or members[0] == members[1]:
-        raise ValueError("Bitte zwei unterschiedliche Thermostate wählen")
+        raise ValueError("srv_select_two")
     for member in members:
         if not member.startswith("climate."):
-            raise ValueError("Beide Mitglieder müssen Thermostate (climate.*) sein")
+            raise ValueError("srv_members_not_climate")
     coupling_id = str(data.get("id") or uuid.uuid4().hex[:12])
     for other in existing:
         if other["id"] != coupling_id and set(other["members"]) == set(members):
-            raise ValueError("Für diese beiden Thermostate gibt es schon eine Gruppe")
+            raise ValueError("srv_group_exists")
     name = str(data.get("name") or "").strip() or "Thermostat-Gruppe"
     return {"id": coupling_id, "name": name, "members": members}
 
 
 class CouplingManager:
-    """Speichert Kopplungen und legt dafür climate-Gruppen-Entities an/ab."""
+    """Stores couplings and creates/removes the climate group entities for them."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
@@ -110,7 +109,7 @@ class CouplingManager:
         for member in coupling["members"]:
             state = self.hass.states.get(member)
             if state and state.attributes.get("smart_heating_planer_group"):
-                raise ValueError("Eine Gruppe kann nicht Mitglied einer anderen Gruppe sein")
+                raise ValueError("srv_no_nested_group")
         old = next((c for c in self.couplings if c["id"] == coupling["id"]), None)
         if old:
             self.couplings[self.couplings.index(old)] = coupling
@@ -140,11 +139,11 @@ class CouplingManager:
 
 
 class CoupledGroupClimate(ClimateEntity):
-    """Fasst zwei Thermostate zu einer climate-Entity zusammen.
+    """Combines two thermostats into one climate entity.
 
-    Befehle gehen per Service-Call mit beiden Entity-IDs an die echten
-    Thermostate – Home Assistant führt den Fan-out dafür schon selbst aus,
-    genau wie bei jedem anderen Service-Call mit mehreren Entities.
+    Commands go to the real thermostats via a service call with both entity
+    IDs – Home Assistant already performs the fan-out itself, just like
+    for any other service call with multiple entities.
     """
 
     _attr_should_poll = False

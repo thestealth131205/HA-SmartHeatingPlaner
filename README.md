@@ -1,168 +1,189 @@
 # Smart Heating Planer
 
-Eine Home-Assistant-Integration mit einer Thermostat-Karte, in der man den Wochenplan seines Heizkörperthermostats direkt antippen und ändern kann. Ein Scheduler oder Automationen für den Zeitplan sind nicht nötig: Der Plan liegt im Thermostat selbst und läuft auch weiter, wenn Home Assistant einmal nicht erreichbar ist.
+🇬🇧 English · [🇩🇪 Deutsch](README.de.md) · [🇨🇿 Čeština](README.cs.md) · [🇸🇰 Slovenčina](README.sk.md) · [🇵🇱 Polski](README.pl.md) · [🇫🇷 Français](README.fr.md)
+
+A Home Assistant integration with a thermostat card that lets you tap and edit the weekly schedule of your radiator thermostat directly. No scheduler or automations are needed for the schedule: it is stored in the thermostat itself and keeps running even when Home Assistant is unreachable.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="Smart Heating Planer Karte auf dem Smartphone" width="360">
+  <img src="docs/screenshot.png" alt="Smart Heating Planer card on a smartphone" width="360">
 </p>
 
-## Funktionen
+## Languages
 
-Die Karte ist für die Bedienung mit dem Finger gebaut: große Knöpfe, keine YAML-Bearbeitung.
+The card follows the language set in your Home Assistant profile (`hass.language`). English is the default and the fallback.
 
-Es gibt sie in zwei Varianten:
-
-| Karte | Inhalt |
+| Language | File |
 |---|---|
-| **Smart Heating Planer** (`custom:smart-heating-planer-card`) | Thermostat und Wochenplan untereinander |
-| **Smart Heating Planer (kompakt)** (`custom:smart-heating-planer-compact-card`) | nur das Thermostat. Ein Tipp auf die Temperatur zwischen − und + öffnet den Wochenplan als Detailansicht. Schließen mit ✕, Tipp daneben oder der Zurück-Taste. |
+| English (default) | `translations/card/en.json` |
+| Deutsch | `translations/card/de.json` |
+| Čeština | `translations/card/cs.json` |
+| Slovenčina | `translations/card/sk.json` |
+| Polski | `translations/card/pl.json` |
+| Français | `translations/card/fr.json` |
+
+The config-flow texts live in `translations/<language>.json`, the card texts in `translations/card/<language>.json` (loaded by the browser at runtime).
+
+**Adding a language:** copy `translations/card/en.json` to `translations/card/<code>.json` and translate the values (plural keys use `.one` / `.few` / `.other`), optionally add `translations/<code>.json` for the config flow, and append the code to `SUPPORTED_LANGS` at the top of `frontend/smart-heating-planer-card.js`. Missing keys fall back to English.
+
+## Features
+
+The card is built for finger operation: big buttons, no YAML editing.
+
+It comes in two variants:
+
+| Card | Content |
+|---|---|
+| **Smart Heating Planer** (`custom:smart-heating-planer-card`) | Thermostat and weekly schedule, one below the other |
+| **Smart Heating Planer (compact)** (`custom:smart-heating-planer-compact-card`) | Thermostat only. Tapping the temperature between − and + opens the weekly schedule as a detail view. Close with ✕, a tap outside or the back button. |
 
 <p align="center">
-  <img src="docs/screenshot-compact.png" alt="Kompakte Karte: nur das Thermostat mit Boost-Rakete" width="320">
+  <img src="docs/screenshot-compact.png" alt="Compact card: thermostat only with boost rocket" width="320">
   &nbsp;
-  <img src="docs/screenshot-dialog.png" alt="Kompakte Karte mit geöffnetem Wochenplan-Dialog" width="480">
+  <img src="docs/screenshot-dialog.png" alt="Compact card with the weekly schedule dialog open" width="480">
 </p>
-<p align="center"><em>Links die kompakte Karte, rechts der Wochenplan-Dialog nach einem Tipp auf die Temperatur.</em></p>
+<p align="center"><em>Left: the compact card. Right: the weekly schedule dialog after tapping the temperature.</em></p>
 
-**Thermostat (oberer Teil)**
-- Große Solltemperatur mit −/+-Knöpfen, darunter die Ist-Temperatur. Oben rechts steht, ob die Heizung gerade heizt oder im Leerlauf ist.
-- Mehrfaches Tippen auf −/+ wird gesammelt und als ein einziger Befehl gesendet. Das schont die Batterie des Thermostats.
-- Modus **Aus**, **Plan** (Auto, das Thermostat folgt dem Wochenplan) oder **Manuell** (feste Temperatur).
-- Im Plan-Modus steht darunter, was gerade gilt, z. B. „Laut Plan 21 °C bis 13:00, danach 20 °C“.
-- **Boost (Rakete unten rechts):** weiß = aus, orange-rot = Boost läuft. Ein Tipp startet oder beendet ihn. Meldet das Thermostat eine Restzeit, steht sie neben der Rakete. Die Karte erkennt den Boost automatisch:
-  - Schalter `switch.*boost*` (z. B. Moes BRT-100, Bosch BTH-RA)
-  - Auswahl `select.*_temporary_mode_mode` mit Option `boost` (SONOFF TRV-ZBT/TRV-ZBL/TRVZB, Boost-Dauer stellt man am Gerät bzw. über `number.*_temporary_mode_duration` ein)
-  - Preset `boost` des Thermostats (viele andere Integrationen)
-  
-  Ohne Boost-Funktion bleibt die Rakete weg. Mit `boost_entity` lässt sich die Entity von Hand festlegen.
+**Thermostat (upper part)**
+- Large target temperature with −/+ buttons, the current temperature below it. At the top right it shows whether the heating is currently heating or idle.
+- Multiple taps on −/+ are collected and sent as a single command. This saves the thermostat's battery.
+- Mode **Off**, **Schedule** (auto, the thermostat follows the weekly schedule) or **Manual** (fixed temperature).
+- In schedule mode, the line below shows what currently applies, e.g. "Per schedule 21 °C until 13:00, then 20 °C".
+- **Boost (rocket at the bottom right):** white = off, orange-red = boost running. A tap starts or ends it. If the thermostat reports a remaining time, it is shown next to the rocket. The card detects boost automatically:
+  - Switch `switch.*boost*` (e.g. Moes BRT-100, Bosch BTH-RA)
+  - Select `select.*_temporary_mode_mode` with option `boost` (SONOFF TRV-ZBT/TRV-ZBL/TRVZB; the boost duration is set on the device or via `number.*_temporary_mode_duration`)
+  - Thermostat preset `boost` (many other integrations)
 
-**Wochenplan (unterer Teil)**
-- **Programm 1 / 2 / 3:** Bei Thermostaten mit mehreren Programmen wird das aktive Programm mit einem Tipp umgeschaltet. Der Knopf ist sofort markiert und pulsiert, bis das Thermostat bestätigt.
-- **Mo–So:** Tag antippen, um seinen Plan zu sehen. Der heutige Tag ist umrandet.
-- **Zeitleiste:** Der ganze Tag als farbiger Balken (blau = kühl, grün/orange = warm) mit einem Strich für „jetzt“.
-- **Schaltpunkte:** Uhrzeit antippen zum Ändern (15-Minuten-Raster), Temperatur mit −/+ in 0,5-°C-Schritten, Mülleimer zum Löschen. Der erste Schaltpunkt ist immer 00:00.
-- **+ Zeitpunkt** fügt einen neuen Schaltpunkt in die größte Lücke des Tages ein.
-- **Kopieren** übernimmt den angezeigten Tag mit einem Tipp auf Mo–Fr, Sa–So oder alle Tage.
-- Geänderte Tage bekommen einen Punkt. Erst **Speichern** schickt sie an das Thermostat, **Verwerfen** macht alles rückgängig.
+  Without a boost function the rocket is hidden. With `boost_entity` you can set the entity by hand.
 
-**Bedingungen (unterhalb des Wochenplans, auch im Dialog der kompakten Karte)**
+**Weekly schedule (lower part)**
+- **Program 1 / 2 / 3:** for thermostats with several programs, the active program is switched with one tap. The button is highlighted immediately and pulses until the thermostat confirms.
+- **Mon–Sun:** tap a day to see its schedule. Today is outlined.
+- **Timeline:** the whole day as a colored bar (blue = cool, green/orange = warm) with a marker for "now".
+- **Switching points:** tap the time to change it (15-minute grid), change the temperature with −/+ in 0.5 °C steps, trash can to delete. The first switching point is always 00:00.
+- **+ Time** inserts a new switching point into the largest gap of the day.
+- **Copy** applies the displayed day to Mon–Fri, Sat–Sun or all days with one tap.
+- Changed days get a dot. Only **Save** sends them to the thermostat, **Discard** reverts everything.
 
-Mit Bedingungen reagiert das Thermostat auf andere Geräte, ohne dass man eine Automation schreiben muss. Beispiel: *Wenn Präsenz erkannt, dann Manuell 22 °C mit Boost, und zurück zum Plan, sobald niemand mehr da ist.*
+**Conditions (below the weekly schedule, also in the compact card's dialog)**
 
-- **Wenn:** eine Entity wählen (Binärsensor, Sensor, Schalter, Person, Helfer …) und die Bedingung antippen. Bei An/Aus-Geräten gibt es passende Knöpfe wie „erkannt / nicht erkannt“ oder „offen / geschlossen“. Bei Zahlen-Sensoren gibt es `>` `<` `=` `≠` und einen Wert (Komma oder Punkt), bei Auswahl-Entities eine Liste.
-- **Dann:** **Manuell** mit einer Temperatur (−/+ in der Schrittweite des Thermostats) oder **Aus**. Optional **Boost starten**.
-- **Zurücksetzen:** Ist die Option an, stellt die Integration den Zustand von vorher wieder her (Plan/Manuell/Aus, Solltemperatur, Boost aus), sobald die Bedingung nicht mehr erfüllt ist.
-- Jede Bedingung lässt sich mit dem Schalter in der Liste vorübergehend abschalten. Antippen öffnet sie zum Bearbeiten oder Löschen.
-- Eine gerade aktive Bedingung ist in der Liste umrandet. In beiden Karten erscheint dann zusätzlich unten links ein Symbol.
+Conditions let the thermostat react to other devices without writing an automation. Example: *If presence is detected, then manual 22 °C with boost, and back to the schedule as soon as nobody is there anymore.*
 
-Ausgewertet werden die Bedingungen in der Integration selbst, also auch wenn keine Karte geöffnet ist und nach einem Neustart von Home Assistant. Gespeichert sind sie in `.storage/smart_heating_planer.conditions`. Zustände wie `unavailable` oder `unknown` lösen nichts aus. Gelten mehrere Bedingungen für dasselbe Thermostat, gewinnt die zuletzt erfüllte, und zurückgesetzt wird erst, wenn keine mehr erfüllt ist. Ändert man während einer aktiven Bedingung von Hand etwas am Thermostat, wird das beim Zurücksetzen überschrieben. Anlegen und Ändern dürfen nur Administratoren.
+- **If:** choose an entity (binary sensor, sensor, switch, person, helper …) and tap the condition. For on/off devices there are suitable buttons such as "detected / not detected" or "open / closed". For numeric sensors there are `>` `<` `=` `≠` and a value (comma or dot), for select entities a list.
+- **Then:** **Manual** with a temperature (−/+ in the thermostat's step size) or **Off**. Optionally **Start boost**.
+- **Reset:** if enabled, the integration restores the previous state (schedule/manual/off, target temperature, boost off) as soon as the condition is no longer met.
+- Each condition can be temporarily disabled with the switch in the list. Tapping it opens it for editing or deleting.
+- A currently active condition is outlined in the list. Both cards additionally show an icon at the bottom left.
 
-**Zwei Thermostate koppeln (ab 1.4.0)**
+Conditions are evaluated in the integration itself, so also when no card is open and after a Home Assistant restart. They are stored in `.storage/smart_heating_planer.conditions`. States such as `unavailable` or `unknown` trigger nothing. If several conditions apply to the same thermostat, the most recently met one wins, and the reset happens only when none is met anymore. If you change something on the thermostat by hand during an active condition, it is overwritten on reset. Only administrators may create and change conditions.
 
-Zwei Thermostate, die immer dieselbe Temperatur/denselben Modus/denselben Wochenplan bekommen sollen (z. B. zwei Heizkörper im selben Raum), lassen sich auf zwei Arten koppeln:
+**Coupling two thermostats (since 1.4.0)**
 
-| | Ohne Gruppe | Mit Gruppe |
+Two thermostats that should always get the same temperature/mode/weekly schedule (e.g. two radiators in the same room) can be coupled in two ways:
+
+| | Without group | With group |
 |---|---|---|
-| Einrichtung | Zweites Thermostat im Karten-Editor (`entity2`) | Abschnitt „Thermostat-Gruppen“ unterhalb des Wochenplans |
-| Neue Entity? | Nein | Ja, eine eigene `climate.*`-Entity |
-| Nutzbar außerhalb dieser Karte? | Nein, nur in dieser Karte | Ja – andere Dashboards, Automationen, Google Home/Alexa |
-| Löschen | Config-Option entfernen | Mülleimer bei der Gruppe (löscht nur die Gruppen-Entity, beide Thermostate bleiben) |
+| Setup | Second thermostat in the card editor (`entity2`) | "Thermostat groups" section below the weekly schedule |
+| New entity? | No | Yes, a dedicated `climate.*` entity |
+| Usable outside this card? | No, only in this card | Yes – other dashboards, automations, Google Home/Alexa |
+| Deleting | Remove the config option | Trash can at the group (deletes only the group entity, both thermostats remain) |
 
-In beiden Fällen gilt: Temperatur, Modus und Boost gehen an beide Thermostate gleichzeitig, der Wochenplan wird beim Speichern an beide geschrieben (jeweils passend zu deren eigenem Profil zugeschnitten). Angezeigt wird immer der Zustand des ersten Thermostats bzw. – bei „mit Gruppe“ – der aus beiden zusammengefasste Zustand (gleich: übernehmen, unterschiedlich: Wert des ersten). Ein kleines 🔗-Symbol neben dem Namen zeigt, mit welchem Thermostat gekoppelt ist. Voraussetzung: Beide Thermostate müssen die Wochenplan-Text-Entities im gleichen Format bereitstellen (siehe Tabelle unten) – sonst wird nur Temperatur/Modus/Boost mitgekoppelt, nicht der Plan.
+In both cases: temperature, mode and boost go to both thermostats at the same time, and the weekly schedule is written to both on save (each tailored to its own profile). The displayed state is always that of the first thermostat or – with "with group" – the combined state of both (equal: adopt it, different: value of the first). A small 🔗 icon next to the name shows which thermostat it is coupled with. Prerequisite: both thermostats must provide the weekly-schedule text entities in the same format (see the table below) – otherwise only temperature/mode/boost are coupled, not the schedule.
 
-## Kompatible Thermostate
+## Compatible thermostats
 
-Die Karte braucht ein Thermostat, das über **Zigbee2MQTT** angebunden ist und seinen Wochenplan als Text-Entities `text.<name>_weekly_schedule_<tag>` im Format `HH:MM/Temperatur` bereitstellt. Die Grenzen pro Modell (Anzahl Schaltpunkte, Temperaturbereich) erkennt die Karte automatisch über das Modell in der Geräte-Registry.
+The card needs a thermostat connected via **Zigbee2MQTT** that provides its weekly schedule as text entities `text.<name>_weekly_schedule_<day>` in the format `HH:MM/temperature`. The card detects the per-model limits (number of switching points, temperature range) automatically from the model in the device registry.
 
-| Hersteller | Modell | Schaltpunkte/Tag | Temperatur | Programme 1–3 | Status |
+| Manufacturer | Model | Switching points/day | Temperature | Programs 1–3 | Status |
 |---|---|---|---|---|---|
-| SONOFF | TRV-ZBT (Thermostat-Kopf) | 12 | 5–30 °C | ✅ | **getestet** |
-| SONOFF | TRV-ZBL | 12 | 5–30 °C | ✅ | gleicher Zigbee2MQTT-Konverter wie TRV-ZBT, nicht getestet |
-| SONOFF | TP-WGZBA (Wand-Thermostat) | 12 | 5–30 °C | ✅ | gleiches Format wie TRV-ZBT, nicht getestet |
-| SONOFF | TRVZB | 6 | 4–35 °C | – | laut Zigbee2MQTT-Konverter kompatibel, nicht getestet |
-| Bosch | BTH-RA (Heizkörper-Thermostat II) | 10 | 5–30 °C | – | laut Zigbee2MQTT-Konverter kompatibel, nicht getestet |
+| SONOFF | TRV-ZBT (thermostat head) | 12 | 5–30 °C | ✅ | **tested** |
+| SONOFF | TRV-ZBL | 12 | 5–30 °C | ✅ | same Zigbee2MQTT converter as TRV-ZBT, not tested |
+| SONOFF | TP-WGZBA (wall thermostat) | 12 | 5–30 °C | ✅ | same format as TRV-ZBT, not tested |
+| SONOFF | TRVZB | 6 | 4–35 °C | – | compatible per Zigbee2MQTT converter, not tested |
+| Bosch | BTH-RA (radiator thermostat II) | 10 | 5–30 °C | – | compatible per Zigbee2MQTT converter, not tested |
 
-Grundlage der Tabelle sind die Gerätedefinitionen von Zigbee2MQTT 2.14 (zigbee-herdsman-converters). Bei Thermostaten ohne Programme werden die Programm-Knöpfe einfach nicht angezeigt.
+The table is based on the device definitions of Zigbee2MQTT 2.14 (zigbee-herdsman-converters). For thermostats without programs, the program buttons are simply not shown.
 
-**Nicht kompatibel:**
-- **Aqara W600:** Der Wochenplan besteht dort aus Voreinstellungen (`08:00/home, 19:00/away`), nicht aus Temperaturen.
-- **Ältere Tuya-, Immax- und Saswell-Thermostate:** Sie haben keine Text-Entities pro Tag, sondern ein eigenes Planformat.
-- **Thermostate über ZHA, Homematic, tado°, Netatmo usw.:** Sie stellen keinen Wochenplan als Text-Entities bereit.
+**Not compatible:**
+- **Aqara W600:** its weekly schedule consists of presets (`08:00/home, 19:00/away`), not temperatures.
+- **Older Tuya, Immax and Saswell thermostats:** they have no per-day text entities but their own schedule format.
+- **Thermostats via ZHA, Homematic, tado°, Netatmo etc.:** they do not provide a weekly schedule as text entities.
 
-Bei allen Thermostaten funktioniert der obere Teil der Karte (Temperatur und Modus), weil er nur die normale `climate`-Entity nutzt. Ohne Wochenplan-Entities zeigt die Karte statt des Plans einen Hinweis.
+For all thermostats the upper part of the card (temperature and mode) works, because it only uses the normal `climate` entity. Without weekly-schedule entities the card shows a notice instead of the schedule.
 
-**Anderes Zigbee2MQTT-Thermostat mit gleichem Format?** Unbekannte Modelle bekommen vorsichtige Grenzen: 6 Schaltpunkte, 5–30 °C. Erlaubt das Gerät mehr Schaltpunkte, kannst du das in der Karte mit `max_slots` einstellen. Über ein Issue mit Modell und Erfahrungen freue ich mich.
+**Another Zigbee2MQTT thermostat with the same format?** Unknown models get cautious limits: 6 switching points, 5–30 °C. If the device allows more switching points, you can set that in the card with `max_slots`. I'd be happy about an issue with the model and your experience.
 
-## Voraussetzungen
+## Requirements
 
-- Home Assistant ab 2025.1
-- Zigbee2MQTT mit aktivierter Home-Assistant-Discovery
-- Ein kompatibles Thermostat (siehe oben)
+- Home Assistant 2025.1 or newer
+- Zigbee2MQTT with Home Assistant discovery enabled
+- A compatible thermostat (see above)
 
 ## Installation
 
-**HACS:** HACS → Benutzerdefinierte Repositories → `https://github.com/thestealth131205/HA-SmartHeatingPlaner` mit Typ „Integration“ hinzufügen → „Smart Heating Planer“ installieren → Home Assistant neu starten.
+**HACS:** HACS → Custom repositories → add `https://github.com/thestealth131205/HA-SmartHeatingPlaner` with type "Integration" → install "Smart Heating Planer" → restart Home Assistant.
 
-**Manuell:** Den Ordner `custom_components/smart_heating_planer` nach `config/custom_components/` kopieren und Home Assistant neu starten.
+**Manual:** copy the folder `custom_components/smart_heating_planer` to `config/custom_components/` and restart Home Assistant.
 
-Danach: Einstellungen → Geräte & Dienste → Integration hinzufügen → **Smart Heating Planer**. Die Karte wird automatisch geladen, eine Dashboard-Ressource muss nicht eingetragen werden.
+Then: Settings → Devices & services → Add integration → **Smart Heating Planer**. The card is loaded automatically, no dashboard resource needs to be added.
 
-> **Tipp für die Companion-App:** Zeigt die App „Custom element doesn't exist: smart-heating-planer-card“, hat sie noch eine alte Startseite im Cache. Dann zusätzlich unter Einstellungen → Dashboards → Ressourcen die URL `/smart_heating_planer/smart-heating-planer-card.js` als JavaScript-Modul eintragen und die App einmal ganz schließen.
+> **Tip for the Companion app:** if the app shows "Custom element doesn't exist: smart-heating-planer-card", it still has an old start page in its cache. Then additionally add the URL `/smart_heating_planer/smart-heating-planer-card.js` as a JavaScript module under Settings → Dashboards → Resources and close the app completely once.
 
-## Karte einbinden
+After an update, refresh the browser with Ctrl+F5 so the new card and translations are loaded.
 
-Dashboard bearbeiten → Karte hinzufügen → „Smart Heating Planer“ suchen, oder per YAML:
+## Adding the card
+
+Edit dashboard → Add card → search for "Smart Heating Planer", or via YAML:
 
 ```yaml
-type: custom:smart-heating-planer-card          # oder custom:smart-heating-planer-compact-card
-entity: climate.heizung
-entity2: climate.heizung_2                      # optional, Kopplung "ohne Gruppe" (siehe oben)
-name: Wohnzimmer                                # optional
-max_slots: 6                                    # optional, nur für Thermostate, die die Karte nicht kennt
-boost_entity: switch.heizung_boost_heating      # optional, sonst automatisch
+type: custom:smart-heating-planer-card          # or custom:smart-heating-planer-compact-card
+entity: climate.heating
+entity2: climate.heating_2                      # optional, coupling "without group" (see above)
+name: Living room                               # optional
+max_slots: 6                                    # optional, only for thermostats the card doesn't know
+boost_entity: switch.heating_boost_heating      # optional, otherwise automatic
 ```
 
-Die Wochenplan- und Programm-Entities werden automatisch über das Gerät des Thermostats gefunden.
+The weekly-schedule and program entities are found automatically via the thermostat's device.
 
-## So funktioniert es
+## How it works
 
-Die Karte liest den Plan aus den Text-Entities des Thermostats, z. B.:
+The card reads the schedule from the thermostat's text entities, e.g.:
 
 ```
 00:00/18 07:00/21 13:00/20 18:00/21 22:00/19
 ```
 
-Ab 00:00 gelten 18 °C, ab 07:00 21 °C usw., der letzte Wert gilt bis Mitternacht. Beim Speichern schreibt die Karte jeden geänderten Tag mit `text.set_value` zurück. Beim SONOFF TRV-ZBT wird der Tag dabei auf 12 Einträge aufgefüllt, indem der letzte Schaltpunkt wiederholt wird. So meldet das Thermostat seinen Plan auch selbst. Bei mehreren Programmen stellt die Karte beim Umschalten `schedule_active_group` und `schedule_group_to_edit` gleichzeitig um. So gehört der angezeigte und gespeicherte Plan immer zum aktiven Programm.
+From 00:00 18 °C applies, from 07:00 21 °C and so on; the last value applies until midnight. On save, the card writes each changed day back with `text.set_value`. For the SONOFF TRV-ZBT the day is padded to 12 entries by repeating the last switching point, which is also how the thermostat reports its schedule itself. With several programs, the card switches `schedule_active_group` and `schedule_group_to_edit` at the same time when changing the program, so the displayed and saved schedule always belongs to the active program.
 
-## Automationen
+## Automations
 
-Für Reaktionen auf Ereignisse (Fenster offen, niemand zu Hause …) einfach normale Automationen mit `climate.set_temperature` oder `climate.set_hvac_mode` verwenden. Im Modus *Plan* übernimmt das Thermostat danach wieder seinen Wochenplan.
+For reactions to events (window open, nobody home …) just use normal automations with `climate.set_temperature` or `climate.set_hvac_mode`. In *Schedule* mode the thermostat then takes over its weekly schedule again.
 
-Beispiel: Heizung aus, solange das Fenster offen ist.
+Example: heating off while the window is open.
 
 ```yaml
 automation:
-  - alias: Heizung aus bei offenem Fenster
+  - alias: Heating off when window is open
     triggers:
       - trigger: state
-        entity_id: binary_sensor.fenster_wohnzimmer
+        entity_id: binary_sensor.window_living_room
         to: "on"
         for: "00:01:00"
     actions:
       - action: climate.set_hvac_mode
-        target: { entity_id: climate.heizung }
+        target: { entity_id: climate.heating }
         data: { hvac_mode: "off" }
-  - alias: Heizung wieder nach Plan
+  - alias: Heating back to schedule
     triggers:
       - trigger: state
-        entity_id: binary_sensor.fenster_wohnzimmer
+        entity_id: binary_sensor.window_living_room
         to: "off"
     actions:
       - action: climate.set_hvac_mode
-        target: { entity_id: climate.heizung }
+        target: { entity_id: climate.heating }
         data: { hvac_mode: auto }
 ```
 
-## Lizenz
+## License
 
 [GPL-3.0](LICENSE)

@@ -1,14 +1,14 @@
-"""Bedingungen: Entity-Zustand schaltet das Thermostat auf Manuell/Aus, optional mit Boost.
+"""Conditions: entity state switches the thermostat to manual/off, optionally with boost.
 
-Eine Bedingung gehört zu genau einem Thermostat. Ist sie erfüllt, wird das
-Thermostat auf den gewählten Modus (Manuell mit Temperatur oder Aus) gestellt
-und auf Wunsch Boost gestartet. Mit ``revert`` stellt die Integration den
-vorherigen Zustand (Modus, Preset, Solltemperatur, Boost) wieder her, sobald
-die Bedingung nicht mehr erfüllt ist.
+A condition belongs to exactly one thermostat. When it is met, the thermostat
+is set to the chosen mode (manual with temperature, or off) and boost is
+started if requested. With ``revert`` the integration restores the previous
+state (mode, preset, target temperature, boost) as soon as the condition
+is no longer met.
 
-Gearbeitet wird zustandsbasiert: Für jede Regel ist gespeichert, ob sie gerade
-aktiv ist. Nach einem Neustart wird nur nachgezogen, was sich wirklich geändert
-hat. ``unavailable``/``unknown`` ändern nichts.
+Work is state-based: for each rule it is stored whether it is currently
+active. After a restart only what has actually changed is caught up.
+``unavailable``/``unknown`` change nothing.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ STORAGE_KEY = f"{DOMAIN}.conditions"
 OPERATORS = ("eq", "ne", "gt", "lt")
 MODES = ("manual", "off")
 _INVALID = (STATE_UNAVAILABLE, STATE_UNKNOWN)
-# Presets, die "läuft nach Plan" bedeuten – dann wird beim Zurücksetzen keine Temperatur gesetzt
+# Presets meaning "runs on schedule" – no temperature is set on reset for these
 _PLAN_PRESETS = ("programming", "schedule", "auto", "program")
 
 
@@ -65,27 +65,27 @@ def condition_met(rule: dict[str, Any], state: State) -> bool:
 
 
 def validate_rule(data: dict[str, Any]) -> dict[str, Any]:
-    """Bereinigt eine Regel aus dem Frontend, wirft ValueError bei Unsinn."""
+    """Sanitizes a rule from the frontend, raises ValueError on nonsense."""
     climate = str(data.get("climate", ""))
     entity = str(data.get("entity", ""))
     if not climate.startswith("climate."):
-        raise ValueError("Thermostat fehlt")
+        raise ValueError("srv_thermostat_missing")
     if "." not in entity or entity == climate:
-        raise ValueError("Entity für die Bedingung fehlt")
+        raise ValueError("srv_entity_missing")
     operator = data.get("operator", "eq")
     if operator not in OPERATORS:
-        raise ValueError("Unbekannter Vergleich")
+        raise ValueError("srv_unknown_operator")
     value = str(data.get("value", "")).strip()
     if not value:
-        raise ValueError("Wert für die Bedingung fehlt")
+        raise ValueError("srv_value_missing")
     if operator in ("gt", "lt") and _to_float(value) is None:
-        raise ValueError("Für größer/kleiner muss der Wert eine Zahl sein")
+        raise ValueError("srv_value_not_number")
     mode = data.get("mode", "manual")
     if mode not in MODES:
-        raise ValueError("Unbekannter Modus")
+        raise ValueError("srv_unknown_mode")
     temperature = _to_float(data.get("temperature"))
     if mode == "manual" and temperature is None:
-        raise ValueError("Temperatur fehlt")
+        raise ValueError("srv_temperature_missing")
     return {
         "id": str(data.get("id") or uuid.uuid4().hex[:12]),
         "climate": climate,
@@ -101,22 +101,22 @@ def validate_rule(data: dict[str, Any]) -> dict[str, Any]:
 
 
 class ConditionManager:
-    """Speichert die Bedingungen, beobachtet ihre Entities und schaltet die Thermostate."""
+    """Stores the conditions, watches their entities and switches the thermostats."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
         self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
         self.rules: list[dict[str, Any]] = []
-        # Laufzeitzustand, wird mitgespeichert:
-        #   active:    climate → [rule_id, …] in Aktivierungsreihenfolge
-        #   snapshots: climate → Zustand vor der ersten aktiven Bedingung
+        # Runtime state, persisted as well:
+        #   active:    climate → [rule_id, …] in activation order
+        #   snapshots: climate → state before the first active condition
         self._active: dict[str, list[str]] = {}
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._unsub_track: CALLBACK_TYPE | None = None
         self._unsub_start: CALLBACK_TYPE | None = None
         self._listeners: set[Callable[[], None]] = set()
 
-    # ---------- Lebenszyklus ----------
+    # ---------- Lifecycle ----------
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}
@@ -162,23 +162,23 @@ class ConditionManager:
         if self._unsub_track:
             self._unsub_track()
             self._unsub_track = None
-        # Auslöser-Entities der Regeln UND die Thermostate aktiver Bedingungen – letztere,
-        # damit ein manuelles Übersteuern während einer aktiven Bedingung sofort erkannt
-        # und zurückgeschaltet wird, statt bis zum nächsten Auslöser-Wechsel zu warten.
+        # Trigger entities of the rules AND the thermostats of active conditions – the latter
+        # so that a manual override during an active condition is detected immediately
+        # and reverted, instead of waiting for the next trigger change.
         entities = sorted(
             {r["entity"] for r in self.rules if r.get("enabled", True)} | set(self._active.keys())
         )
         if entities:
             self._unsub_track = async_track_state_change_event(self.hass, entities, self._on_state)
 
-    # ---------- Änderungen aus dem Frontend ----------
+    # ---------- Changes from the frontend ----------
 
     async def async_save_rule(self, data: dict[str, Any]) -> dict[str, Any]:
         rule = validate_rule(data)
         old = next((r for r in self.rules if r["id"] == rule["id"]), None)
         if old:
             self.rules[self.rules.index(old)] = rule
-            # Thermostat gewechselt oder deaktiviert: alte Regel sauber beenden
+            # Thermostat switched or deactivated: cleanly end the old rule
             if self._is_active(old) and (old["climate"] != rule["climate"] or not rule["enabled"]):
                 await self._deactivate(old)
         else:
@@ -198,13 +198,13 @@ class ConditionManager:
         self._track()
         self._save()
 
-    # ---------- Auswertung ----------
+    # ---------- Evaluation ----------
 
     def _is_active(self, rule: dict[str, Any]) -> bool:
         return rule["id"] in self._active.get(rule["climate"], [])
 
     async def _evaluate_all(self) -> None:
-        # Regeln, deren Thermostat verschwunden ist oder die gelöscht wurden, aufräumen
+        # Clean up rules whose thermostat has disappeared or that were deleted
         known = {r["id"] for r in self.rules}
         for climate, ids in list(self._active.items()):
             self._active[climate] = [i for i in ids if i in known]
@@ -225,11 +225,11 @@ class ConditionManager:
             self.hass.async_create_task(self._enforce(entity_id))
 
     async def _enforce(self, climate: str) -> None:
-        """Erzwingt die zuletzt aktivierte Bedingung erneut, falls sie manuell übersteuert wurde.
+        """Re-enforce the most recently activated condition if it was manually overridden.
 
-        _apply() ändert nur, was tatsächlich abweicht – ist der Zustand schon korrekt
-        (z. B. weil dieser Aufruf selbst die Änderung ausgelöst hat), passiert nichts,
-        die Kette bricht also sofort ab.
+        _apply() only changes what actually differs – if the state is already correct
+        (e.g. because this very call triggered the change), nothing happens,
+        so the chain stops immediately.
         """
         ids = self._active.get(climate)
         if not ids:
@@ -278,7 +278,7 @@ class ConditionManager:
             self._track()
         self._save()
         if remaining:
-            # Eine andere Bedingung für dasselbe Thermostat gilt noch – die übernimmt
+            # Another condition for the same thermostat is still active – it takes over
             if rule.get("boost") and not remaining[-1].get("boost"):
                 await self._set_boost(climate, False)
             await self._apply(remaining[-1])
@@ -286,7 +286,7 @@ class ConditionManager:
             _LOGGER.info("Bedingung %s nicht mehr erfüllt – stelle %s wieder her", rule["id"], climate)
             await self._restore(climate, snapshot, boost_was_set=rule.get("boost", False))
 
-    # ---------- Thermostat schalten ----------
+    # ---------- Switching the thermostat ----------
 
     def _snapshot(self, climate: str) -> dict[str, Any]:
         st = self.hass.states.get(climate)
@@ -318,7 +318,7 @@ class ConditionManager:
             if "off" in hvac_modes and st.state != "off":
                 await self._call("climate", "set_hvac_mode", {"entity_id": climate, "hvac_mode": "off"})
             return
-        # Manuell: Moes & Co. über Preset "manual", Sonoff & Co. über hvac_mode "heat"
+        # Manual: Moes & co. via preset "manual", Sonoff & co. via hvac_mode "heat"
         if "manual" in presets:
             if st.attributes.get("preset_mode") != "manual":
                 await self._call("climate", "set_preset_mode", {"entity_id": climate, "preset_mode": "manual"})
@@ -343,12 +343,12 @@ class ConditionManager:
         state = snap.get("state")
         if state in hvac_modes and state != st.state:
             await self._call("climate", "set_hvac_mode", {"entity_id": climate, "hvac_mode": state})
-        # Nur bei manuellem Betrieb die alte Solltemperatur zurück – im Plan-Modus gibt der Plan sie vor
+        # Restore the old target temperature only in manual operation – in schedule mode the schedule dictates it
         manual = state not in ("auto", "off", None) and (preset or "") not in _PLAN_PRESETS
         if manual and snap.get("temperature") is not None:
             await self._call("climate", "set_temperature", {"entity_id": climate, "temperature": snap["temperature"]})
 
-    # Boost wie in der Karte: Schalter (Moes …), Auswahl "temporary mode" (Sonoff) oder Preset "boost"
+    # Boost as in the card: switch (Moes …), select "temporary mode" (Sonoff) or preset "boost"
     def _boost(self, climate: str) -> dict[str, str] | None:
         states = self.hass.states
         registry = er.async_get(self.hass)

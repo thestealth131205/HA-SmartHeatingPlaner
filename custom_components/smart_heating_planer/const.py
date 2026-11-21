@@ -1,8 +1,9 @@
-"""Konstanten für Smart Heating Planer."""
+"""Constants for Smart Heating Planer."""
 
 DOMAIN = "smart_heating_planer"
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 CARD_FILENAME = "smart-heating-planer-card.js"
 CARD_URL_BASE = f"/{DOMAIN}"
+TRANSLATIONS_URL_BASE = f"/{DOMAIN}_translations"
 CARD_URL = f"{CARD_URL_BASE}/{CARD_FILENAME}"
